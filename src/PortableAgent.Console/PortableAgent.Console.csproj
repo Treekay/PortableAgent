@@ -4,6 +4,7 @@
     <ProjectReference Include="..\PortableAgent.Core\PortableAgent.Core.csproj" />
     <ProjectReference Include="..\PortableAgent.Infrastructure\PortableAgent.Infrastructure.csproj" />
     <ProjectReference Include="..\PortableAgent.Persistence\PortableAgent.Persistence.csproj" />
+    <ProjectReference Include="..\PortableAgent.Adapters.Mcp\PortableAgent.Adapters.Mcp.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

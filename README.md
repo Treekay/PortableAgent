@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化与待审批检查点重启恢复）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化与待审批检查点重启恢复）、Phase 5A（最小 MCP 适配）已完成。**
 
-当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订使用不同的模型和工具组合，共用 Core。MCP、真实模型、HTTP API、SSE、Studio 尚未实现。
+当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订使用不同的模型和工具组合，共用 Core。Phase 5A 新增单来源 MCP 只读工具闭环；真实模型、Agent HTTP API、执行事件 SSE、Studio 尚未实现。
 
 已支持：
 
@@ -19,6 +19,7 @@
 - `Completed`、`Failed`、`Cancelled`、`LimitReached` 四种终止状态与非终止 `AwaitingApproval`。
 - 17 种结构化执行事件、可选 live sink、SQLite 事件历史及有界分页读取。
 - JSON 状态快照、版本 CAS、关键状态与事件的原子保存。
+- 单来源 Streamable HTTP MCP 工具适配；Core 与 Persistence 保持 Phase 4B 原样。
 - **AwaitingApproval 成功保存 → 进程退出 → 新进程批准/拒绝 → 恢复同一个 Run。**
 
 | 领域 | 模型可见工具 | 可信 ToolId |
@@ -98,24 +99,95 @@ src/
       Entities/            Runs、ExecutionEvents 映射
       Serialization/       显式 SnapshotDtos、RunStateSerializer
       Migrations/          InitialPersistence 与模型快照
-  PortableAgent.Console/   init / pause / approve / reject，事件展示
+  PortableAgent.Adapters.Mcp/
+    McpSourceDefinition.cs  可信来源与完整 Endpoint
+    McpToolAdapter.cs       同时实现 provider/executor，管理单客户端
+    McpToolMapper.cs        发现、参数和结果映射
+    McpResultJson.cs        显式 structuredContent null 的 SDK JSON 转换
+  PortableAgent.Console/   init / pause / approve / reject / mcp-status
+samples/
+  PortableAgent.Sample.McpServer/  独立 ASP.NET Core MCP 服务，仅一个工具
 tests/
   PortableAgent.Core.Tests/
   PortableAgent.IntegrationTests/
   PortableAgent.Persistence.Tests/
+  PortableAgent.Adapters.Mcp.Tests/
 dotnet-tools.json          固定版本的本地 dotnet-ef 工具
 ```
 
 ```text
-Console → Core + Infrastructure + Persistence
+Console → Core + Infrastructure + Persistence + Adapters.Mcp
 Infrastructure → Core
 Persistence → Core
+Adapters.Mcp → Core + 官方 ModelContextProtocol.Core
+Sample.McpServer → 官方 ModelContextProtocol.AspNetCore（不引用任何 PortableAgent 运行时项目）
 Core.Tests → Core
 IntegrationTests → Core + Infrastructure
 Persistence.Tests → Core + Infrastructure + Persistence
+Adapters.Mcp.Tests → Adapters.Mcp + Infrastructure + Persistence + Sample.McpServer
 ```
 
 Core 不引用 EF Core、SQLite、模型 SDK、MCP、ASP.NET Core 或业务类型。无 DI 容器、通用 repository、UnitOfWork 或额外 service 包装。
+
+## Phase 5A：MCP 协议适配
+
+官方 `ModelContextProtocol.Core` 和 `ModelContextProtocol.AspNetCore` 固定为 **2.2.0**；后者传递引用 `ModelContextProtocol` 2.2.0。运行时侧 MCP 依赖只进入 Adapters.Mcp，示例服务器独立引用官方 ASP.NET Core 包。Core、AgentRunner、Core 工具契约和 Persistence 均零改动。
+
+先完成构建及数据库初始化，再在两个终端运行：
+
+```sh
+# 终端 A：独立服务器，固定监听 http://localhost:5101/mcp
+dotnet run --project samples/PortableAgent.Sample.McpServer
+
+# 终端 B：仓库根目录，沿用 portable-agent.db
+dotnet run --project src/PortableAgent.Console -- init
+dotnet run --project src/PortableAgent.Console -- mcp-status
+```
+
+`mcp-status` 假定服务器已启动，不负责拉起或重启服务。它使用 `sample-mcp-demo-v1`、协议无关的 ServerStatusScriptedModelProvider、同一个 McpToolAdapter 作为 provider/executor、既有 Console sink 和 SQLite Store。正常结果为：
+
+```text
+[9] Tool execution started · get_server_status
+[10] Tool execution completed · get_server_status · success=True
+[11] Model turn 2 started
+[12] Model turn 2 completed · Completed
+[13] Run completed · 2 model turns · 1 tool call(s)
+RunId: <run-id>
+Status: Completed
+The sample service is online.
+```
+
+[Phase 5A 验证记录](docs/phase5a-verification.md) 包含实际双进程输出、数据库读取结果、测试与 SDK 兼容处理。
+
+### 可信来源与发现
+
+配置类型为 `McpSourceDefinition(string SourceId, Uri Endpoint)`。SourceId 非空白，Endpoint 必须是绝对 HTTP/HTTPS 地址，包含完整路由；不猜测 `/mcp`。Console 固定 `sample-mcp` 与 `http://localhost:5101/mcp`，不接受模型、参数或提示中的地址。HTTP 自动重定向关闭。
+
+客户端显式使用 StreamableHttp，关闭 standalone GET stream 及流重连尝试；服务器显式使用 `HttpServerSessionMode.Stateless`，不启用 legacy SSE。MCP 传输与未来 Studio 执行事件 SSE 是不同边界。
+
+每次 GetToolsAsync 都通过官方 SDK 重新读取完整分页工具目录。SourceId 来自配置，ToolId.Name 和初始 ModelName 来自远程名称，缺省 Description 为空串，InputSchema 克隆保存。重复 ToolId / ModelName 使用 ordinal 比较并明确失败，不改名、不覆盖。发现失败不退回旧目录。
+
+适配器保留最近成功发现的目录供防御性一致性检查，**它不替代 Runner 的可信注册定义**。执行前检查完成发现、SourceId、ToolId、ModelName、InputSchema 及 Call.ToolName；实际远程工具名始终使用 `registeredTool.Id.Name`。
+
+### 参数和结果
+
+Arguments 必须是 JSON object；包括嵌套对象在内的重复属性名均拒绝。属性值按 JsonElement 克隆，保持对象、数组、数字、字符串、布尔与 null；空参数发送 `{}`。Core CallId 保持本地关联，不用作 JSON-RPC ID 或远程幂等键。
+
+StructuredContent 存在时原样克隆，支持 **object / array / string / number / boolean / null**，不人为包装原始值，也不进行 outputSchema 校验。缺省时将文本块按顺序映射为 `{"content":[{"type":"text","text":"..."}]}`；无内容返回 `{"content":[]}`。文本即使看起来像 JSON 也不重新解析。存在任何非文本富内容块就明确失败，包括同时具有 StructuredContent 的响应。
+
+SDK 2.2.0 的便捷 CallToolAsync 将显式 JSON null 与 StructuredContent 缺省合并。本实现使用同一官方 McpClient 的类型化 `SendRequestAsync<CallToolRequestParams, CallToolResult>`，请求方法为 SDK 的 `RequestMethods.ToolsCall`，在 SDK 默认 JSON 配置上加入一个 nullable JsonElement 转换器以保留显式 null。协议封装、请求 ID、HTTP、错误和取消仍全部由 SDK 负责；没有手写 JSON-RPC、协议解析器或 Core 改动。真实 HTTP 测试覆盖该差异。
+
+IsError 为 true 且内容可映射时，返回 Executed + IsSuccess=false，Error 优先使用文本说明；Runner 发布 ToolExecutionCompleted(success=false) 后 Failed，不再次调用模型。HTTP、协议、解析失败沿异常路径产生 Failed，不伪造 ToolResult；调用者取消沿既有路径产生 Cancelled。不自动重试工具。
+
+### 生命周期与限制
+
+构造仅校验配置，首次发现时惰性创建 transport/client，后续发现和执行复用它们。一个 SemaphoreSlim 串行协调初始化、发现、执行和释放；等待支持调用者取消。DisposeAsync 等待正在进行的操作，释放 client，并在 finally 中释放持有 HttpClient 的 transport；之后调用明确拒绝，不重新连接。宿主应先取消/等待活动 Run 再释放适配器，没有额外超时或连接池框架。
+
+初始化失败清理已创建资源并让当前操作失败；后续显式的新操作可以重新初始化，但当前操作不循环重试。已连接客户端故障也不触发自动重连。
+
+RunState 仍只保存 Core 数据，不保存客户端、连接、会话 ID 或 MCP 对象；通用 Runtime 事件与 SQLite schema 不变。MCP 审批恢复边界可沿用既有机制，但 Phase 5A 未新增写操作或审批演示。
+
+远程请求发出后的网络故障不证明业务副作用未发生，取消也不代表回滚。错误回到模型、远程写操作不确定性、重连/超时、多来源、别名、认证、富内容和更高并发留到 Phase 5B/5C。
 
 ## 策略和恢复边界
 
@@ -221,15 +293,16 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 ## 测试与阅读顺序
 
-`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**118 通过，0 失败，0 跳过**。
+`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**164 通过，0 失败，0 跳过**。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
 | Core.Tests | 30 | 执行循环、校验、预算、取消、事件语义 |
 | IntegrationTests | 40 | 领域迁移、策略、批次、内存审批与并发 |
 | Persistence.Tests | 48 | DTO、独立 Store、重启批准/拒绝、SQLite CAS、事务故障、事件顺序 |
+| Adapters.Mcp.Tests | 46 | 真实 Kestrel/MCP、JSON 类型、路由、取消、生命周期、通用事件和 SQLite |
 
-原有 70 个测试保留行为断言，仅调整配置身份和 Store 签名；原“暂停保存失败”替身从 Create 故障改为暂停 Replace 故障，继续验证相同边界。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
+Phase 5A 未修改前 118 个测试。Phase 4B 的原有 70 个测试保留行为断言，仅调整配置身份和 Store 签名；原“暂停保存失败”替身从 Create 故障改为暂停 Replace 故障，继续验证相同边界。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
 
 建议依次阅读 [Console](src/PortableAgent.Console/Program.cs)、[AgentRunner](src/PortableAgent.Core/Execution/AgentRunner.cs)、[AgentMessage](src/PortableAgent.Core/Models/AgentMessage.cs)、[审批测试](tests/PortableAgent.IntegrationTests/ApprovalTests.cs)、[SqliteRunStateStore](src/PortableAgent.Persistence/Sqlite/SqliteRunStateStore.cs)、[快照映射](src/PortableAgent.Persistence/Sqlite/Serialization/RunStateSerializer.cs)、[重启测试](tests/PortableAgent.Persistence.Tests/RestartTests.cs) 和 [事务故障测试](tests/PortableAgent.Persistence.Tests/TransactionTests.cs)。
 
@@ -237,8 +310,9 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 5 | MCP 适配器与协议迁移验证 |
+| Phase 5B | Pet/Flight MCP 服务与写操作审批、重启恢复 |
+| Phase 5C | 远程失败语义、重连/超时、并发、多来源、别名、认证及富内容 |
 | Phase 6 | ASP.NET Core API、HTTP 命令与 SSE 订阅 |
 | Phase 7 | Developer Studio：Chat 与内联执行进度 |
 
-进入 MCP 前需要明确可信服务器配置与稳定 ToolId、名称映射、协议 Schema 兼容性、参数校验、凭据/资源授权及远程取消和副作用语义；RuntimeDefinitionId 仍需由配置方维护。当前 Phase 4B 未实现这些内容，也没有多 Agent、RAG、向量数据库、分布式执行、动态插件或工作流图引擎。
+Phase 5A 已实现可信单来源绑定、名称一致性和参数对象检查；通用 Schema 校验、凭据/资源授权与远程副作用恢复仍待后续设计。RuntimeDefinitionId 由配置方维护。未实现多 Agent、RAG、向量数据库、分布式执行、动态插件或工作流图引擎。
