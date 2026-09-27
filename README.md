@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）已完成。**
 
-当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。真实模型、Agent HTTP API、执行事件 SSE、Studio 尚未实现。
+当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。现已提供 ASP.NET Core 命令与查询 API；真实模型、执行事件 SSE、Studio 尚未实现。
 
 已支持：
 
@@ -22,6 +22,7 @@
 - 单来源 Streamable HTTP MCP 工具适配；Core 保持协议无关，Persistence 无 MCP 专用结构。
 - 正常工具失败进入模型会话，模型可以解释或显式提出新的尝试；Runtime 不自动重试。
 - **AwaitingApproval 成功保存 → 进程退出 → 新进程批准/拒绝 → 恢复同一个 Run。**
+- HTTP 列出 Agent、启动、查询、批准/拒绝与取消活动 Run；开始和审批均在持久化提交后返回 202，执行不依赖 HTTP 连接存续。
 
 | 领域 | 模型可见工具 | 可信 ToolId |
 | --- | --- | --- |
@@ -107,6 +108,10 @@ src/
     McpResultJson.cs        显式 structuredContent null 的 SDK JSON 转换
   PortableAgent.Console/   原有命令 + mcp-pet-* / mcp-flight-*
     McpDomainDemo.cs       两个独立 MCP 来源的可信装配
+  PortableAgent.Api/       ASP.NET Core 本地命令与查询宿主
+    Contracts/            专用公开请求与响应 DTO
+    Endpoints/            Agent、Run、审批、取消和 ProblemDetails
+    Hosting/              Registry、Coordinator、提交确认信号和 Store 装饰器
 samples/
   PortableAgent.Sample.McpServer/  独立 ASP.NET Core MCP 服务，仅一个工具
   PortableAgent.Sample.PetBoardingMcpServer/  护理记录、进程内员工任务
@@ -116,11 +121,13 @@ tests/
   PortableAgent.IntegrationTests/
   PortableAgent.Persistence.Tests/
   PortableAgent.Adapters.Mcp.Tests/
+  PortableAgent.Api.Tests/  真实 Kestrel、独立 SQLite、Flight MCP 端到端
 dotnet-tools.json          固定版本的本地 dotnet-ef 工具
 ```
 
 ```text
 Console → Core + Infrastructure + Persistence + Adapters.Mcp
+Api → Core + Infrastructure + Persistence + Adapters.Mcp
 Infrastructure → Core
 Persistence → Core
 Adapters.Mcp → Core + 官方 ModelContextProtocol.Core
@@ -129,9 +136,64 @@ Core.Tests → Core
 IntegrationTests → Core + Infrastructure
 Persistence.Tests → Core + Infrastructure + Persistence
 Adapters.Mcp.Tests → Adapters.Mcp + Infrastructure + Persistence + 三个 Sample MCP Server
+Api.Tests → Api + Flight Sample MCP Server
 ```
 
-Core 不引用 EF Core、SQLite、模型 SDK、MCP、ASP.NET Core 或业务类型。Runtime 不引入 DI 容器、通用 repository 或 UnitOfWork；服务器使用 ASP.NET Core 宿主注册自己的业务状态。
+Core 不引用 EF Core、SQLite、模型 SDK、MCP、ASP.NET Core 或业务类型。DI 只用于 API / sample 宿主边界；Core 继续使用直接构造函数，不引入容器、通用 repository 或 UnitOfWork。
+
+## Phase 6A：HTTP 命令与查询 API
+
+从仓库根目录，在两个独立终端启动 Flight MCP 与 API：
+
+```sh
+dotnet run --project samples/PortableAgent.Sample.FlightBookingMcpServer
+dotnet run --project src/PortableAgent.Api -- --DatabasePath portable-agent.db
+```
+
+API 默认监听 `http://localhost:5100`，启动时应用既有 SQLite migration，保留原数据。`DatabasePath` 可为绝对路径，默认相对启动工作目录。端口可用 `--urls http://localhost:5200` 配置。可信宿主配置 `Agents:pet:Endpoint` / `Agents:flight:Endpoint` 默认指向 `localhost:5102/mcp` / `localhost:5103/mcp`，HTTP 客户端不能覆盖它们；实质更换业务绑定时需要维护对应 RuntimeDefinitionId。
+
+Pet 演示需另启 `dotnet run --project samples/PortableAgent.Sample.PetBoardingMcpServer`。API 注册的 `pet`、`flight` 均使用 MCP adapter，无本地业务执行器；工具发现按需连接。
+
+| 请求 | 成功响应 | 含义 |
+| --- | --- | --- |
+| `GET /api/agents` | 200 | 仅公开 Agent id、name |
+| `POST /api/runs` | 202 + Location | Run 与 RunStarted 已提交 |
+| `GET /api/runs/{runId}` | 200 | 持久化状态 DTO，附当前宿主 isActive |
+| `POST /api/runs/{runId}/approvals/{approvalId}` | 202 + Location | 批准或拒绝的 CAS 已提交；执行可以尚未完成 |
+| `POST /api/runs/{runId}/cancel` | 202 + Location | 已向当前宿主活动执行发出取消信号 |
+
+PowerShell 演示（先批准一次，Flight sample 重启后可重新演示）：
+
+```powershell
+$base = 'http://localhost:5100'
+Invoke-RestMethod "$base/api/agents"
+$accepted = Invoke-RestMethod "$base/api/runs" -Method Post -ContentType 'application/json' `
+    -Body '{"agentId":"flight","message":"Cancel my booking."}'
+$run = Invoke-RestMethod ($base + $accepted.runUrl)
+# 若仍为 Running，稍后再次 GET，直至 AwaitingApproval。
+$run.pendingApproval
+Invoke-RestMethod "$base/api/runs/$($run.runId)/approvals/$($run.pendingApproval.approvalId)" `
+    -Method Post -ContentType 'application/json' -Body '{"decision":"approve"}'
+Invoke-RestMethod ($base + $accepted.runUrl)
+# 拒绝使用 {"decision":"reject"}。取消当前活动 Run：
+# Invoke-RestMethod "$base/api/runs/<runId>/cancel" -Method Post
+```
+
+开始请求仅接受 `agentId`、`message`，消息限 1–8000 字符且不能全为空白。未知 JSON 属性（包括 runId、runtimeDefinitionId、endpoint）返回 400；审批只接受字符串 `approve` / `reject`，不接受数值枚举或 AgentId。RunId 由可信宿主生成。
+
+开始返回 `{runId,status:"accepted",runUrl}`；审批额外返回 `approvalId`。`accepted` 是命令状态，快速执行可能在响应送达前已经 Completed。开始必须等 Store 成功创建，审批必须等 Store 成功 CAS 且同批包含 ApprovalResolved、RunResumed；信号来自 API Store 装饰器，独立于 live event sink。提交失败不会伪造 202。
+
+错误使用 `application/problem+json`，包含稳定 `code`：400 `invalid_request`；404 `agent_not_found` / `run_not_found`；409 `approval_conflict` / `run_not_active` / `runtime_unavailable`；503 `host_stopping`；500 `internal_error`。不返回异常原文或堆栈。
+
+查询返回 runId、agentId（无兼容注册时为 null）、status、modelTurns、toolCalls、snapshotSequence、isActive、finalText、failure、pendingApproval。`status` 使用 Core 生命周期名称；`snapshotSequence` 是 **RunState.LastSequence，不是最新事件游标**。Running 时计数和快照可能落后于已经落库的事件。仅 Completed 从持久化最后一条 Assistant 消息提取 finalText；Failed 只公开 `{code:"run_failed",message:"Run execution did not complete."}`，详细失败原因不能持久化查询。AwaitingApproval 返回审批 ID、工具身份、精确冻结参数、理由和时间。
+
+**HTTP 请求生命周期不等于 Run 生命周期。** Coordinator 持有每次执行的 Task 和独立 CTS，断开开始或审批请求只终止 HTTP 等待。每条消息创建独立 Run，无 Session 记忆。每个 Agent 的 Runner、脚本、策略与 MCP adapter 长期复用，adapter 当前按 Agent 串行化 MCP 操作；不同 Run 的状态和取消源独立。
+
+暂停或终止后移除活动记录；审批按已保存 RuntimeDefinitionId 匹配注册并创建新的执行 CTS，SQLite CAS 仍是最终审批所有权判定。关闭宿主停止接收执行、取消活动 CTS，并在宿主关闭期限内等待任务，随后由 Registry 释放 adapter。依赖必须配合取消，期限并不提供远端回滚保证。
+
+API 重启后可查询历史终态与待审批，并显式恢复兼容的 AwaitingApproval。`isActive` 是当前宿主内存信息，可能出现 `Running + false`；不会扫描或自动恢复 Running。取消只针对当前宿主活动 Running，AwaitingApproval、终态及非活动 Running 均返回 409；取消与完成竞争时以 Runner 最终持久化结果为准。
+
+API **仅供本地开发，无认证、资源授权或前端**。每个 Agent 共享 sample 业务身份，不可作为多租户服务开放。没有 SSE、事件订阅端点、自动重试、崩溃恢复或 exactly-once 保证。完整验证见 [Phase 6A 验证记录](docs/phase6a-verification.md)。
 
 ## Phase 5A：MCP 协议适配
 
@@ -350,7 +412,7 @@ Payload 只选择性保存计数、CallId、工具名称/身份、PolicyId、状
 
 `SafeExecutionEventSink` 只隔离 live observer 故障，数据库写入不经过它。live sink 失败不改变运行语义，不重试；历史可通过 Store 重新读取。普通事件使用运行取消令牌，已提交的审批事实和终止事件使用 None 尽力投递。未配置 Store 时保留进程内观察模式。
 
-当前仍顺序等待 sink，慢或不返回的 sink 会阻塞执行。共享 sink 需自行保证并发安全。本阶段没有后台队列、HTTP API、SSE 或可靠实时交付保证。
+当前仍顺序等待 sink，慢或不返回的 sink 会阻塞执行。共享 sink 需自行保证并发安全。Phase 4B 本身未包含 HTTP API；Phase 6A 已在独立宿主提供命令与查询，但没有事件后台队列、SSE 或可靠实时交付保证。
 
 ### EF 迁移
 
@@ -378,16 +440,17 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 ## 测试与阅读顺序
 
-`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**200 通过，0 失败，0 跳过**。
+`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**234 通过，0 失败，0 跳过**。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
-| Core.Tests | 39 | 执行循环、批次失败恢复、预算、策略重评估、取消、事件契约 |
+| Core.Tests | 41 | 执行循环、批次失败恢复、预算、策略重评估、取消、事件契约、可信预分配 RunId |
 | IntegrationTests | 40 | 领域迁移、策略、批次、内存审批与并发 |
 | Persistence.Tests | 49 | DTO、新 disposition 往返、独立 Store、重启批准/拒绝、SQLite CAS、事务故障 |
 | Adapters.Mcp.Tests | 72 | 协议适配、领域迁移、审批恢复、真实工具失败恢复及远端副作用不确定性 |
+| Api.Tests | 32 | 提交确认、独立执行、HTTP 断开、审批/取消/重启、资源释放、真实 Flight MCP |
 
-Phase 5C 新增 16 项测试，有意更新三个旧测试中的“正常工具失败立即终止”语义，并强化协议异常与持久化故障断言。Phase 5B 的 184 项基线均保留测试意图，其他安全边界不变。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
+Phase 6A 在 Phase 5C 的 200 项基线上新增 2 项 Core 与 32 项 API 测试，原测试保持通过。Phase 5C 新增的 16 项测试覆盖正常工具失败交回模型，并强化协议异常与持久化故障断言。持久化与 API 测试使用独立临时文件数据库，不复用演示数据库。API 测试通过真实 Kestrel HTTP 连接与受控模型/工具验证异步边界；持久化事务故障测试通过 SQLite trigger 注入真实回滚。
 
 建议依次阅读 [Console](src/PortableAgent.Console/Program.cs)、[AgentRunner](src/PortableAgent.Core/Execution/AgentRunner.cs)、[AgentMessage](src/PortableAgent.Core/Models/AgentMessage.cs)、[审批测试](tests/PortableAgent.IntegrationTests/ApprovalTests.cs)、[SqliteRunStateStore](src/PortableAgent.Persistence/Sqlite/SqliteRunStateStore.cs)、[快照映射](src/PortableAgent.Persistence/Sqlite/Serialization/RunStateSerializer.cs)、[重启测试](tests/PortableAgent.Persistence.Tests/RestartTests.cs) 和 [事务故障测试](tests/PortableAgent.Persistence.Tests/TransactionTests.cs)。
 
@@ -395,7 +458,7 @@ Phase 5C 新增 16 项测试，有意更新三个旧测试中的“正常工具�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 6 | ASP.NET Core API、HTTP 命令与 SSE 订阅 |
+| Phase 6B | SSE 执行事件订阅；等待单独实施授权 |
 | Phase 7 | Developer Studio：Chat 与内联执行进度 |
 | 后续按需 | MCP 多来源、别名、认证、富内容、超时/连接生命周期及并发增强 |
 

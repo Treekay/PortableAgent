@@ -35,8 +35,13 @@ public sealed class AgentRunner
     }
 
     public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default)
+        => RunAsync(Guid.NewGuid(), request, cancellationToken);
+
+    /// <summary>Starts a Run with an identity allocated by the trusted host, not by the model or user request.</summary>
+    public Task<AgentRunResult> RunAsync(Guid runId, AgentRunRequest request, CancellationToken cancellationToken = default)
     {
-        var state = new RunState { RunId = Guid.NewGuid(), RuntimeDefinitionId = _runtimeDefinitionId, Limits = _limits };
+        if (runId == Guid.Empty) throw new ArgumentException("RunId must not be empty.", nameof(runId));
+        var state = new RunState { RunId = runId, RuntimeDefinitionId = _runtimeDefinitionId, Limits = _limits };
         return new RunExecution(this, state, cancellationToken, stored: false).StartAsync(request);
     }
 

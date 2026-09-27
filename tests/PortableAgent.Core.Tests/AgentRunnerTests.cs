@@ -15,6 +15,34 @@ public sealed class AgentRunnerTests
     private static readonly AgentRunRequest Request = new("Calculate 2 + 3.");
 
     [Fact]
+    public async Task Trusted_host_id_is_preserved_and_legacy_overload_allocates_distinct_ids()
+    {
+        var runner = new AgentRunner("test-runtime-v1", new RecordingModel(_ => new("Done.", [], ModelFinishReason.Completed)),
+            new TestToolProvider(), new RecordingExecutor(), new());
+        var id = Guid.NewGuid();
+        Assert.Equal(id, (await runner.RunAsync(id, Request)).RunId);
+        var first = (await runner.RunAsync(Request)).RunId;
+        var second = (await runner.RunAsync(Request)).RunId;
+        Assert.NotEqual(Guid.Empty, first);
+        Assert.NotEqual(Guid.Empty, second);
+        Assert.NotEqual(first, second);
+        Assert.NotEqual(id, first);
+    }
+
+    [Fact]
+    public async Task Empty_host_id_is_rejected_before_dependencies_are_called()
+    {
+        var model = new RecordingModel(_ => Propose(Call()));
+        var tools = new TestToolProvider();
+        var executor = new RecordingExecutor();
+        var runner = new AgentRunner("test-runtime-v1", model, tools, executor, new());
+        await Assert.ThrowsAsync<ArgumentException>(() => runner.RunAsync(Guid.Empty, Request));
+        Assert.Empty(model.Requests);
+        Assert.Equal(0, tools.Calls);
+        Assert.Empty(executor.Calls);
+    }
+
+    [Fact]
     public async Task Successful_run_passes_correlated_result_to_second_model_turn()
     {
         var model = new RecordingModel(request => request.Messages.Count == 1
