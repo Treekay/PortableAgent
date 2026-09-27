@@ -88,6 +88,7 @@ public sealed class TransactionTests
         var result = (await fresh.Runner.SubmitApprovalAsync(Composition.Command(paused))).RunResult!;
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Equal(calls, fresh.Executor.Calls.Count);
+        Assert.Equal(calls, (await db.Store().GetAsync(paused.RunId, default))!.ToolCalls);
         Assert.Empty(fresh.Model.Requests);
         var events = await db.Store().ReadEventsAfterAsync(paused.RunId, 0, 100, default);
         Assert.DoesNotContain(events, e => e.EventType == failingEvent);

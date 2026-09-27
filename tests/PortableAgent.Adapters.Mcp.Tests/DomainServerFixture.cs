@@ -24,6 +24,8 @@ internal sealed class DomainServerFixture : IAsyncDisposable
     public FlightBookingState Flight { get; } = new();
     public IList<Tool> Catalog { get; private set; } = null!;
     public ConcurrentQueue<JsonElement> Requests { get; } = new();
+    // Test-only injection; production sample handlers and catalogs stay static.
+    public Func<CallToolRequestParams, CallToolResult>? CallOverride { get; set; }
     public int Discoveries => Requests.Count(r => r.GetProperty("method").GetString() == "tools/list");
     public JsonElement[] Calls(string toolName) => Requests.Where(r =>
         r.GetProperty("method").GetString() == "tools/call"
@@ -43,8 +45,8 @@ internal sealed class DomainServerFixture : IAsyncDisposable
         builder.Services.AddMcpServer()
             .WithHttpTransport(o => o.SessionMode = HttpServerSessionMode.Stateless)
             .WithListToolsHandler((_, _) => ValueTask.FromResult(new ListToolsResult { Tools = fixture.Catalog }))
-            .WithCallToolHandler((request, _) => ValueTask.FromResult(pet
-                ? petTools.Call(request.Params!) : flightTools.Call(request.Params!)));
+            .WithCallToolHandler((request, _) => ValueTask.FromResult(fixture.CallOverride is { } custom
+                ? custom(request.Params!) : pet ? petTools.Call(request.Params!) : flightTools.Call(request.Params!)));
         fixture._app = builder.Build();
         fixture._app.Use(async (context, next) =>
         {

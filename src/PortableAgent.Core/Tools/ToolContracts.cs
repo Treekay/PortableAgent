@@ -9,7 +9,10 @@ public sealed record ToolDefinition(
 
 public sealed record ToolCall(string CallId, string ToolName, JsonElement Arguments);
 
-public enum ToolResultDisposition { Executed, DeniedByPolicy, RejectedByUser, NotExecutedDueToBatchPolicy }
+public enum ToolResultDisposition
+{
+    Executed, DeniedByPolicy, RejectedByUser, NotExecutedDueToBatchPolicy, NotExecutedDueToPriorFailure
+}
 
 public sealed record ToolResult(
     string CallId, bool IsSuccess, JsonElement? Output = null, string? Error = null,

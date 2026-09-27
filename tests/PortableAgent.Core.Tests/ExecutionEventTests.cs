@@ -82,7 +82,7 @@ public sealed class ExecutionEventTests
 
     [Theory]
     [InlineData("unknown", RunStatus.Failed, ExecutionEventType.RunFailed, 0)]
-    [InlineData("failure", RunStatus.Failed, ExecutionEventType.RunFailed, 1)]
+    [InlineData("failure", RunStatus.Completed, ExecutionEventType.RunCompleted, 1)]
     [InlineData("correlation", RunStatus.Failed, ExecutionEventType.RunFailed, 1)]
     [InlineData("limit", RunStatus.LimitReached, ExecutionEventType.RunLimitReached, 0)]
     [InlineData("cancelled", RunStatus.Cancelled, ExecutionEventType.RunCancelled, 0)]
@@ -92,8 +92,10 @@ public sealed class ExecutionEventTests
         string scenario, RunStatus status, ExecutionEventType terminal, int toolCalls)
     {
         var sink = new RecordingSink();
-        var model = new RecordingModel(_ => scenario == "exception"
+        var model = new RecordingModel(request => scenario == "exception"
             ? throw new InvalidOperationException("sensitive-exception")
+            : scenario == "failure" && request.Messages.Count > 1
+                ? new("The tool reported a failure.", [], ModelFinishReason.Completed)
             : Propose(scenario == "unknown" ? "not-registered" : "calculator_add"));
         var executor = new RecordingExecutor
         {
@@ -123,8 +125,14 @@ public sealed class ExecutionEventTests
             Assert.Empty(model.Requests);
         }
         if (scenario == "failure")
+        {
             Assert.False(Assert.Single(events, e => e.EventType == ExecutionEventType.ToolExecutionCompleted)
                 .Payload.GetProperty("success").GetBoolean());
+            Assert.Equal(2, model.Requests.Count);
+            Assert.False(model.Requests[1].Messages[^1].ToolResult!.IsSuccess);
+        }
+        if (scenario is "correlation" or "tool-exception")
+            Assert.DoesNotContain(events, e => e.EventType == ExecutionEventType.ToolExecutionCompleted);
         if (scenario == "unknown")
         {
             Assert.Equal(ExecutionEventType.ToolCallProposed, events[^2].EventType);

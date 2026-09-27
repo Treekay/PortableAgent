@@ -49,6 +49,37 @@ public sealed class SerializationTests
         Assert.Equal("NZ123", restored.ResolvedApprovals[0].ToolCall.Arguments.GetProperty("bookingId").GetString());
     }
 
+    [Fact]
+    public void Completed_batch_with_business_failure_and_skipped_result_round_trips_without_schema_change()
+    {
+        var state = Sample();
+        var call = state.PendingApproval!.ToolCall;
+        var calls = new[] { call with { CallId = "A" }, call with { CallId = "B" }, call with { CallId = "C" } };
+        state.Lifecycle = RunLifecycleState.Completed;
+        state.PendingApproval = null;
+        state.ResolvedApprovals.Clear();
+        state.UsedCallIds = new(["A", "B", "C"], StringComparer.Ordinal);
+        state.ToolCalls = 2;
+        state.Conversation = [AgentMessage.User("batch"), AgentMessage.AssistantToolRequest(null, calls),
+            AgentMessage.FromToolResult(new("A", true, JsonSerializer.SerializeToElement(new { status = "ok" }))),
+            AgentMessage.FromToolResult(new("B", false, JsonSerializer.SerializeToElement(new { code = "invalid" }), "Invalid input.")),
+            AgentMessage.FromToolResult(new("C", false, Error: "Earlier call failed.", Disposition: ToolResultDisposition.NotExecutedDueToPriorFailure)),
+            AgentMessage.AssistantFinal("The failure was handled.")];
+        var json = RunStateSerializer.Serialize(state);
+        var restored = RunStateSerializer.Deserialize(json);
+        Assert.Equal(json, RunStateSerializer.Serialize(restored));
+        Assert.Equal(1, JsonNode.Parse(json)!["schemaVersion"]!.GetValue<int>());
+        var results = restored.Conversation.Where(m => m.Role == MessageRole.Tool).Select(m => m.ToolResult!).ToArray();
+        Assert.Equal(new[] { "A", "B", "C" }, results.Select(r => r.CallId));
+        Assert.False(results[1].IsSuccess);
+        Assert.Equal("Invalid input.", results[1].Error);
+        Assert.Equal("invalid", results[1].Output!.Value.GetProperty("code").GetString());
+        Assert.Equal(ToolResultDisposition.NotExecutedDueToPriorFailure, results[2].Disposition);
+        Assert.Null(results[2].Output);
+        Assert.Equal(2, restored.ToolCalls);
+        Assert.Contains("C", restored.UsedCallIds);
+    }
+
     [Theory]
     [InlineData("schema")]
     [InlineData("lifecycle")]

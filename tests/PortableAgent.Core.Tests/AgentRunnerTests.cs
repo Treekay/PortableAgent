@@ -74,14 +74,23 @@ public sealed class AgentRunnerTests
     }
 
     [Fact]
-    public async Task Tool_failure_stops_without_another_model_call()
+    public async Task Tool_failure_reaches_model_as_correlated_result_without_automatic_retry()
     {
-        var model = new RecordingModel(_ => Propose(Call()));
-        var executor = new RecordingExecutor { Execute = call => new(call.CallId, false, Error: "Tool failed.") };
+        var model = new RecordingModel(request => request.Messages.Count == 1 ? Propose(Call())
+            : new("The calculation could not be completed.", [], ModelFinishReason.Completed));
+        var output = JsonSerializer.SerializeToElement(new { code = "invalid_input" });
+        var executor = new RecordingExecutor { Execute = call => new(call.CallId, false, output, "Tool failed.") };
         var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new()).RunAsync(Request);
-        Assert.Equal(RunStatus.Failed, result.Status);
-        Assert.Equal("Tool failed.", result.Error);
-        Assert.Single(model.Requests);
+        Assert.Equal(RunStatus.Completed, result.Status);
+        Assert.Equal("The calculation could not be completed.", result.FinalText);
+        Assert.Equal(2, model.Requests.Count);
+        var message = model.Requests[1].Messages[^1];
+        Assert.Equal(MessageRole.Tool, message.Role);
+        Assert.Equal("call-1", message.ToolResult!.CallId);
+        Assert.Equal(ToolResultDisposition.Executed, message.ToolResult.Disposition);
+        Assert.False(message.ToolResult.IsSuccess);
+        Assert.Equal("Tool failed.", message.ToolResult.Error);
+        Assert.True(JsonElement.DeepEquals(output, message.ToolResult.Output!.Value));
         Assert.Single(executor.Calls);
     }
 

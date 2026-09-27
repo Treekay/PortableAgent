@@ -160,7 +160,10 @@ public sealed class AgentRunner
                             && !SamePolicy(resolved, decision))
                             result = await PauseAsync(current, resolved.ToolCall, decision);
                         else
-                            result = await ExecuteToolAsync(current, resolved.ToolCall) ?? await ContinueAsync();
+                        {
+                            var execution = await ExecuteToolAsync(current, resolved.ToolCall);
+                            result = execution.Terminal ?? await ContinueAsync();
+                        }
                     }
                 }
             }
@@ -264,10 +267,18 @@ public sealed class AgentRunner
                     if (proposal.ToolCalls.Count != 1) return Failed("Multi-call approval is not supported in Phase 4A.");
                     return await PauseAsync(registry[proposal.ToolCalls[0].ToolName], proposal.ToolCalls[0], decisions[0]);
                 }
-                foreach (var call in proposal.ToolCalls)
+                for (var i = 0; i < proposal.ToolCalls.Count; i++)
                 {
-                    var failed = await ExecuteToolAsync(registry[call.ToolName], call);
-                    if (failed is not null) return failed;
+                    var call = proposal.ToolCalls[i];
+                    var execution = await ExecuteToolAsync(registry[call.ToolName], call);
+                    if (execution.Terminal is { } terminal) return terminal;
+                    if (execution.BusinessFailed)
+                    {
+                        for (var j = i + 1; j < proposal.ToolCalls.Count; j++)
+                            AppendNonExecuted(proposal.ToolCalls[j], ToolResultDisposition.NotExecutedDueToPriorFailure,
+                                "An earlier tool call in this batch failed; this call was not executed.");
+                        break;
+                    }
                 }
             }
         }
@@ -275,23 +286,23 @@ public sealed class AgentRunner
         private void AppendNonExecuted(ToolCall call, ToolResultDisposition disposition, string reason) =>
             state.Conversation.Add(AgentMessage.FromToolResult(new(call.CallId, false, Error: reason, Disposition: disposition)));
 
-        private async Task<AgentRunResult?> ExecuteToolAsync(ToolDefinition tool, ToolCall call)
+        private async Task<(AgentRunResult? Terminal, bool BusinessFailed)> ExecuteToolAsync(ToolDefinition tool, ToolCall call)
         {
             token.ThrowIfCancellationRequested();
-            if (state.ToolCalls >= state.Limits.MaxToolCalls) return Limited("Maximum tool calls reached.");
-            state.ToolCalls++;
+            if (state.ToolCalls >= state.Limits.MaxToolCalls) return (Limited("Maximum tool calls reached."), false);
             await EmitAsync(ExecutionEventType.ToolExecutionStarted,
                 new { callId = call.CallId, toolId = $"{tool.Id.SourceId}/{tool.Id.Name}", toolName = call.ToolName });
+            state.ToolCalls++; // Count invocation, not a failed attempt to persist its start event.
             var result = await owner._executor.ExecuteAsync(tool, call, token);
+            if (result.CallId != call.CallId) return (Failed("Tool result CallId does not match the requested call."), false);
+            if (result.Disposition != ToolResultDisposition.Executed)
+                return (Failed("An invoked executor must return an Executed disposition."), false);
+            // Completed means the returned result passed Runtime correlation and disposition checks.
             await EmitAsync(ExecutionEventType.ToolExecutionCompleted,
                 new { callId = call.CallId, toolName = call.ToolName, success = result.IsSuccess });
             token.ThrowIfCancellationRequested();
-            if (result.CallId != call.CallId) return Failed("Tool result CallId does not match the requested call.");
-            if (result.Disposition != ToolResultDisposition.Executed)
-                return Failed("An invoked executor must return an Executed disposition.");
-            if (!result.IsSuccess) return Failed(result.Error ?? "Tool execution failed.");
             state.Conversation.Add(AgentMessage.FromToolResult(result));
-            return null;
+            return (null, !result.IsSuccess);
         }
 
         private async Task<AgentRunResult> PauseAsync(ToolDefinition tool, ToolCall call, PolicyDecision decision)

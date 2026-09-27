@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 可迁移性与远程写操作审批恢复）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）已完成。**
 
 当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。真实模型、Agent HTTP API、执行事件 SSE、Studio 尚未实现。
 
@@ -19,7 +19,8 @@
 - `Completed`、`Failed`、`Cancelled`、`LimitReached` 四种终止状态与非终止 `AwaitingApproval`。
 - 17 种结构化执行事件、可选 live sink、SQLite 事件历史及有界分页读取。
 - JSON 状态快照、版本 CAS、关键状态与事件的原子保存。
-- 单来源 Streamable HTTP MCP 工具适配；Core 与 Persistence 保持 Phase 4B 原样。
+- 单来源 Streamable HTTP MCP 工具适配；Core 保持协议无关，Persistence 无 MCP 专用结构。
+- 正常工具失败进入模型会话，模型可以解释或显式提出新的尝试；Runtime 不自动重试。
 - **AwaitingApproval 成功保存 → 进程退出 → 新进程批准/拒绝 → 恢复同一个 Run。**
 
 | 领域 | 模型可见工具 | 可信 ToolId |
@@ -180,7 +181,7 @@ StructuredContent 存在时原样克隆，支持 **object / array / string / num
 
 SDK 2.2.0 的便捷 CallToolAsync 将显式 JSON null 与 StructuredContent 缺省合并。本实现使用同一官方 McpClient 的类型化 `SendRequestAsync<CallToolRequestParams, CallToolResult>`，请求方法为 SDK 的 `RequestMethods.ToolsCall`，在 SDK 默认 JSON 配置上加入一个 nullable JsonElement 转换器以保留显式 null。协议封装、请求 ID、HTTP、错误和取消仍全部由 SDK 负责；没有手写 JSON-RPC、协议解析器或 Core 改动。真实 HTTP 测试覆盖该差异。
 
-IsError 为 true 且内容可映射时，返回 Executed + IsSuccess=false，Error 优先使用文本说明；Runner 发布 ToolExecutionCompleted(success=false) 后 Failed，不再次调用模型。HTTP、协议、解析失败沿异常路径产生 Failed，不伪造 ToolResult；调用者取消沿既有路径产生 Cancelled。不自动重试工具。
+IsError 为 true 且内容可映射时，返回 Executed + IsSuccess=false，Error 优先使用文本说明。从 Phase 5C 起，Runner 校验结果契约后发布 ToolExecutionCompleted(success=false)，把结果交回模型。HTTP、协议、解析失败沿异常路径产生 Failed，不伪造 ToolResult；调用者取消沿既有路径产生 Cancelled。不自动重试工具。
 
 ### 生命周期与限制
 
@@ -190,11 +191,11 @@ IsError 为 true 且内容可映射时，返回 Executed + IsSuccess=false，Err
 
 RunState 仍只保存 Core 数据，不保存客户端、连接、会话 ID 或 MCP 对象；通用 Runtime 事件与 SQLite schema 不变。MCP 审批恢复边界可沿用既有机制，但 Phase 5A 未新增写操作或审批演示。
 
-远程请求发出后的网络故障不证明业务副作用未发生，取消也不代表回滚。错误回到模型、远程写操作不确定性、重连/超时、多来源、别名、认证、富内容和更高并发留到 Phase 5C。
+远程请求发出后的网络故障不证明业务副作用未发生，取消也不代表回滚。Phase 5C 只实现正常工具错误回到模型并验证远端结果不确定性；重连/超时、多来源、别名、认证、富内容和更高并发仍留待以后，不阻塞 API/Studio MVP。
 
 ## Phase 5B：领域 MCP 与远程审批
 
-两个 sample 使用官方 MCP SDK 2.2.0、Streamable HTTP 和 `HttpServerSessionMode.Stateless`。协议会话无状态，业务应用仍各自持有进程内单例状态；服务器重启会重置业务数据。Core、Persistence、Adapters.Mcp 以及两个领域 scripted model 相对 Phase 5A 均零修改。
+两个 sample 使用官方 MCP SDK 2.2.0、Streamable HTTP 和 `HttpServerSessionMode.Stateless`。协议会话无状态，业务应用仍各自持有进程内单例状态；服务器重启会重置业务数据。Phase 5B 实施时，Core、Persistence、Adapters.Mcp 以及两个领域 scripted model 相对 Phase 5A 均零修改；后续 Phase 5C 仅调整通用 Core 失败处理语义。
 
 | 业务 | 默认端点 | SourceId | RuntimeDefinitionId |
 | --- | --- | --- | --- |
@@ -249,6 +250,30 @@ Flight 服务器维护 NZ123 的真实状态。重复取消返回已有的 cance
 
 完整的实际跨进程批准/拒绝记录、网络调用计数、业务变更计数和 SQLite 事件验证见 [Phase 5B 验证记录](docs/phase5b-verification.md)。
 
+## Phase 5C：工具失败恢复与远端结果语义
+
+`ToolResult` 字段不变。`Executed + IsSuccess=false` 是正常返回的工具结果，保留 CallId、Output、Error，以 Tool 消息交给模型。模型可解释失败后 Completed，也可显式提出新 CallId 的操作；Runtime 不解析错误文本、不生成重试调用。
+
+| 情况 | Runtime 行为 |
+| --- | --- |
+| 正常返回 Executed / true | 追加结果，继续当前批次 |
+| 正常返回 Executed / false | 追加结果，跳过批次剩余调用，预算允许时继续模型 |
+| CallId 不匹配或 executor 返回非 Executed | Failed，不发布 ToolExecutionCompleted，不追加无效结果 |
+| executor、HTTP、协议或映射异常 | Failed，不伪造 ToolResult，不再调用模型 |
+| 调用方取消 | 保留 Cancelled 语义，不代表业务回滚 |
+
+`ToolExecutionCompleted` 现在表示执行器返回了通过 CallId 与 Disposition 校验的结果，`success` 表示业务结果是否成功。正常业务失败会产生 `ToolExecutionCompleted(success=false)`，而不是立即产生 RunFailed；模型自身若不支持该失败结果并抛出异常，Run 仍可以 Failed。
+
+全部 Allow 的批次按顺序执行。若 A 成功、B 业务失败、C 尚未执行，会按 A/B/C 顺序追加三个 Tool 消息；C 使用 `NotExecutedDueToPriorFailure`，保留原 CallId，`IsSuccess=false`、`Output=null`，无执行事件，不消耗工具执行次数。它与策略阻止整批执行的 `NotExecutedDueToBatchPolicy` 含义不同。已执行的 A 不会回滚。
+
+整批工具、CallId、预算和策略预检查保持不变。所有原提案 CallId 都已占用，跳过的调用也不能复用旧 ID。模型新提案必须重新经过工具解析、预算、策略和审批；失败执行消耗一次 ToolCalls，每次模型调用消耗 ModelTurns，预算可终止反复尝试。
+
+已批准的写操作返回业务失败后，原审批仍为已解决；模型若提出新写调用，即使 PolicyId 不变，也需要新的 ApprovalId。没有新增工具结果检查点，SQLite 保存时机与 Running 不可自动恢复的边界不变。
+
+**Run Failed 不证明远端操作没有发生。** 真实 HTTP 测试中，服务器先取消订单再返回协议错误，Runtime Failed，但订单已变为 cancelled；请求只发送一次。没有新增 OutcomeUnknown 类型、自动重试或补偿。
+
+本阶段仅修改两个 Core 生产文件，Persistence、MCP adapter、sample server、生产 scripted models 均未修改。实际测试与兼容说明见 [Phase 5C 验证记录](docs/phase5c-verification.md)。Phase 5A/5B 验证报告保留当时的历史语义。
+
 ## 策略和恢复边界
 
 模型提出操作，Runtime 校验和调度工具；业务系统仍负责身份认证、资源权限、业务合法性和最终一致性。人工批准不能替代这些检查。工具由可信目录解析，模型不能指定任意服务器地址。输入 Schema 暂无通用校验器，各领域执行器自行检查参数。
@@ -259,12 +284,12 @@ Flight 服务器维护 NZ123 的真实状态。重复取消返回已有的 cance
 
 | 批次政策 | 行为 |
 | --- | --- |
-| 全部 Allow | 顺序执行 |
+| 全部 Allow | 顺序执行，首次业务失败后跳过剩余调用 |
 | 存在 Deny | 整批零执行，分别反馈 DeniedByPolicy / NotExecutedDueToBatchPolicy |
 | 无 Deny，多调用且存在 RequireApproval | Failed，零执行；尚不支持多调用审批 |
 | 单调用 RequireApproval | 冻结参数、原子保存，返回 AwaitingApproval |
 
-`ToolResult.Disposition` 默认 Executed；实际工具失败终止运行。策略拒绝和用户拒绝是未执行结果，会交回模型继续处理。第二个工具失败不会回滚第一个工具。
+`ToolResult.Disposition` 的值为 Executed、DeniedByPolicy、RejectedByUser、NotExecutedDueToBatchPolicy、NotExecutedDueToPriorFailure。有效的已执行失败与未执行结果均可交回模型；执行器异常仍终止运行。第二个工具失败不会回滚第一个工具。
 
 `PendingApproval` 保存 ApprovalId、RunId、完整工具定义、精确 ToolCall、PolicyId、PolicyReason、时间和状态。批准后不会让模型重新生成参数。版本 CAS 只允许一个审批提交获得执行权，其他提交返回 Conflict，不执行工具，不写审批事件。
 
@@ -290,7 +315,7 @@ SQLite Store 每次操作创建并释放自己的 DbContext，使用短事务，
 { "schemaVersion": 1, "state": { } }
 ```
 
-`state` 实际保存全部 RunState 数据：可信配置身份、生命周期和 Version、对话、工具目录、待审批和已解决审批、模型/工具计数、原 RunLimits、UsedCallIds 和 LastSequence。显式 DTO 映射通过 AgentMessage 工厂重建消息，拥有独立 JSON/集合；UsedCallIds 恢复 ordinal 比较语义。缺失字段、畸形消息、未知枚举和未知 schemaVersion 明确失败。当前只支持 v1，没有快照升级机制。Task、模型实例、委托、执行器、sink、CancellationToken 均不序列化。
+`state` 实际保存全部 RunState 数据：可信配置身份、生命周期和 Version、对话、工具目录、待审批和已解决审批、模型/工具计数、原 RunLimits、UsedCallIds 和 LastSequence。显式 DTO 映射通过 AgentMessage 工厂重建消息，拥有独立 JSON/集合；UsedCallIds 恢复 ordinal 比较语义。缺失字段、畸形消息、未知枚举和未知 schemaVersion 明确失败。当前只支持 v1，没有快照升级机制。Phase 5C 能读取旧 v1 快照，但旧二进制不保证读取包含新增枚举值的新 v1 快照，项目不承诺降级兼容。此次枚举扩展不修改 schemaVersion；未来结构变化可另行升级。Task、模型实例、委托、执行器、sink、CancellationToken 均不序列化。
 
 Store 契约（每个操作还接收 CancellationToken）：
 
@@ -353,16 +378,16 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 ## 测试与阅读顺序
 
-`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**184 通过，0 失败，0 跳过**。
+`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**200 通过，0 失败，0 跳过**。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
-| Core.Tests | 30 | 执行循环、校验、预算、取消、事件语义 |
+| Core.Tests | 39 | 执行循环、批次失败恢复、预算、策略重评估、取消、事件契约 |
 | IntegrationTests | 40 | 领域迁移、策略、批次、内存审批与并发 |
-| Persistence.Tests | 48 | DTO、独立 Store、重启批准/拒绝、SQLite CAS、事务故障、事件顺序 |
-| Adapters.Mcp.Tests | 66 | 原 46 项 + 20 项领域迁移、业务状态、远程审批恢复和契约变化测试 |
+| Persistence.Tests | 49 | DTO、新 disposition 往返、独立 Store、重启批准/拒绝、SQLite CAS、事务故障 |
+| Adapters.Mcp.Tests | 72 | 协议适配、领域迁移、审批恢复、真实工具失败恢复及远端副作用不确定性 |
 
-Phase 5B 保留全部原有 164 项测试，新增 20 项。Phase 5A 未修改前 118 个测试。Phase 4B 的原有 70 个测试保留行为断言，仅调整配置身份和 Store 签名；原“暂停保存失败”替身从 Create 故障改为暂停 Replace 故障，继续验证相同边界。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
+Phase 5C 新增 16 项测试，有意更新三个旧测试中的“正常工具失败立即终止”语义，并强化协议异常与持久化故障断言。Phase 5B 的 184 项基线均保留测试意图，其他安全边界不变。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
 
 建议依次阅读 [Console](src/PortableAgent.Console/Program.cs)、[AgentRunner](src/PortableAgent.Core/Execution/AgentRunner.cs)、[AgentMessage](src/PortableAgent.Core/Models/AgentMessage.cs)、[审批测试](tests/PortableAgent.IntegrationTests/ApprovalTests.cs)、[SqliteRunStateStore](src/PortableAgent.Persistence/Sqlite/SqliteRunStateStore.cs)、[快照映射](src/PortableAgent.Persistence/Sqlite/Serialization/RunStateSerializer.cs)、[重启测试](tests/PortableAgent.Persistence.Tests/RestartTests.cs) 和 [事务故障测试](tests/PortableAgent.Persistence.Tests/TransactionTests.cs)。
 
@@ -370,8 +395,8 @@ Phase 5B 保留全部原有 164 项测试，新增 20 项。Phase 5A 未修改�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 5C | 远程失败语义、重连/超时、并发、多来源、别名、认证及富内容 |
 | Phase 6 | ASP.NET Core API、HTTP 命令与 SSE 订阅 |
 | Phase 7 | Developer Studio：Chat 与内联执行进度 |
+| 后续按需 | MCP 多来源、别名、认证、富内容、超时/连接生命周期及并发增强 |
 
 Phase 5A 已实现可信单来源绑定、名称一致性和参数对象检查；通用 Schema 校验、凭据/资源授权与远程副作用恢复仍待后续设计。RuntimeDefinitionId 由配置方维护。未实现多 Agent、RAG、向量数据库、分布式执行、动态插件或工作流图引擎。

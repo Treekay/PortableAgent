@@ -61,20 +61,24 @@ public sealed class RuntimeIntegrationTests
     }
 
     [Fact]
-    public async Task Mcp_tool_error_terminates_runtime_without_model_retry()
+    public async Task Mcp_tool_error_reaches_model_without_runtime_generated_retry()
     {
         await using var server = await TestServerFixture.StartAsync();
         server.Handler = (_, _) => ValueTask.FromResult(new CallToolResult { IsError = true, Content = [new TextContentBlock { Text = "Service check failed." }] });
         await using var adapter = new McpToolAdapter(new("sample-mcp", server.Endpoint));
-        var model = new RecordingModel();
+        var model = new RecordingModel(handleFailure: true);
         var events = new Events();
         var result = await Runner(adapter, model, events).RunAsync(new("Check the sample service status."));
-        Assert.Equal(RunStatus.Failed, result.Status);
-        Assert.Equal("Service check failed.", result.Error);
-        Assert.Single(model.Requests);
+        Assert.Equal(RunStatus.Completed, result.Status);
+        Assert.Equal("The service check could not be completed.", result.FinalText);
+        Assert.Equal(2, model.Requests.Count);
+        var returned = model.Requests[1].Messages[^1].ToolResult!;
+        Assert.Equal("Service check failed.", returned.Error);
+        Assert.Equal("status-call-1", returned.CallId);
+        Assert.False(returned.IsSuccess);
         Assert.Single(server.Calls);
         Assert.False(Assert.Single(events.Items, e => e.EventType == ExecutionEventType.ToolExecutionCompleted).Payload.GetProperty("success").GetBoolean());
-        Assert.Equal(ExecutionEventType.RunFailed, events.Items[^1].EventType);
+        Assert.Equal(ExecutionEventType.RunCompleted, events.Items[^1].EventType);
     }
 
     [Theory]
@@ -83,19 +87,22 @@ public sealed class RuntimeIntegrationTests
     [InlineData("malformed")]
     public async Task Infrastructure_failures_throw_in_adapter_and_fail_run_without_fake_result_or_retry(string fault)
     {
+        using var db = await TestDatabase.CreateAsync();
         await using var server = await TestServerFixture.StartAsync();
         if (fault == "protocol") server.Handler = (_, _) => throw new McpProtocolException("Unknown remote tool.", McpErrorCode.InvalidParams);
         else server.Fault = fault;
         await using var adapter = new McpToolAdapter(new("sample-mcp", server.Endpoint));
         var model = new RecordingModel();
         var events = new Events();
-        var result = await Runner(adapter, model, events).RunAsync(new("Check the sample service status."));
+        var result = await Runner(adapter, model, events, db.Store).RunAsync(new("Check the sample service status."));
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Single(model.Requests);
         Assert.Single(server.Methods, m => m == "tools/call");
         Assert.Single(events.Items, e => e.EventType == ExecutionEventType.ToolExecutionStarted);
         Assert.DoesNotContain(events.Items, e => e.EventType == ExecutionEventType.ToolExecutionCompleted);
         Assert.Equal(ExecutionEventType.RunFailed, events.Items[^1].EventType);
+        var saved = (await db.Store.GetAsync(result.RunId, default))!;
+        Assert.DoesNotContain(saved.Conversation, message => message.Role == MessageRole.Tool);
     }
 
     [Fact]
@@ -142,12 +149,17 @@ public sealed class RuntimeIntegrationTests
         Assert.Equal(ExecutionEventType.RunCancelled, events.Items[^1].EventType);
     }
 
-    private sealed class RecordingModel : IModelProvider
+    private sealed class RecordingModel(bool handleFailure = false) : IModelProvider
     {
         private readonly ServerStatusScriptedModelProvider _inner = new();
         public List<ModelRequest> Requests { get; } = [];
         public Task<ModelReply> GenerateAsync(ModelRequest request, CancellationToken ct)
-        { Requests.Add(request); return _inner.GenerateAsync(request, ct); }
+        {
+            Requests.Add(request);
+            if (handleFailure && request.Messages.LastOrDefault()?.ToolResult is { IsSuccess: false })
+                return Task.FromResult(new ModelReply("The service check could not be completed.", [], ModelFinishReason.Completed));
+            return _inner.GenerateAsync(request, ct);
+        }
     }
     private sealed class Events : IExecutionEventSink
     {
