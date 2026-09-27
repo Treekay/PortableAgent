@@ -8,6 +8,9 @@ public static class RunEndpoints
 {
     public static void MapRunEndpoints(this WebApplication app)
     {
+        app.MapGet("/api/runs/{runId}/tools", async (string runId, IRunStateStore store, CancellationToken requestAborted) =>
+            Results.Ok(RunToolsDto.FromState(await GetAsync(ParseId(runId), store, requestAborted))));
+
         app.MapPost("/api/runs", async (StartRunRequest request, AgentRuntimeRegistry registry,
             RunExecutionCoordinator coordinator, CancellationToken requestAborted) =>
         {

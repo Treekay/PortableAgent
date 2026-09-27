@@ -118,6 +118,7 @@ internal sealed class TestRuntime : IModelProvider, IToolProvider, IToolExecutor
     public TaskCompletionSource ToolRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public ConcurrentQueue<ToolCall> Calls { get; } = new();
     public int DisposeCount;
+    public int DiscoveryCount;
     public ToolDefinition Tool { get; } = new(new("test-source", "write"), "write", "Test write",
         JsonSerializer.SerializeToElement(new { type = "object" }));
 
@@ -135,7 +136,11 @@ internal sealed class TestRuntime : IModelProvider, IToolProvider, IToolExecutor
             ? new(null, [new("call-1", Tool.ModelName, JsonSerializer.SerializeToElement(new { value = "frozen" }))], ModelFinishReason.ToolCalls)
             : new(request.Messages[^1].ToolResult!.Disposition == ToolResultDisposition.RejectedByUser ? "Rejected." : "Finished.", [], ModelFinishReason.Completed);
     }
-    public Task<IReadOnlyList<ToolDefinition>> GetToolsAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<ToolDefinition>>([Tool]);
+    public Task<IReadOnlyList<ToolDefinition>> GetToolsAsync(CancellationToken ct)
+    {
+        Interlocked.Increment(ref DiscoveryCount);
+        return Task.FromResult<IReadOnlyList<ToolDefinition>>([Tool]);
+    }
     public async Task<ToolResult> ExecuteAsync(ToolDefinition tool, ToolCall call, CancellationToken ct)
     {
         Calls.Enqueue(call);

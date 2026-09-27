@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）、Phase 6B（持久化回放与实时 SSE）、Phase 7A（Developer Studio Chat）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）、Phase 6B（持久化回放与实时 SSE）、Phase 7A（Developer Studio Chat）、Phase 7B（Trace / Graph / Tools 检查）已完成。**
 
 当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。现已提供 ASP.NET Core 命令、查询及执行事件 SSE，以及 React Studio 的独立任务、内联进度与审批界面；真实模型尚未实现。
 
@@ -25,6 +25,7 @@
 - HTTP 列出 Agent、启动、查询、批准/拒绝与取消活动 Run；开始和审批均在持久化提交后返回 202，执行不依赖 HTTP 连接存续。
 - SSE 从 SQLite 回放事件并跟随新进度，支持按 Sequence 重连；断开或慢订阅者溢出不会取消 Run。
 - Studio 从 API 读取 Agent，展示分组执行进度、只读审批参数、取消请求与持久化最终回答；错误、传输状态和 Runtime 状态分开管理。
+- Studio 的 Trace、实际执行 Graph 和持久化工具目录共享 Run 选择与事件解释；切换页面保持 Chat、审批和原有 SSE 连接。
 
 | 领域 | 模型可见工具 | 可信 ToolId |
 | --- | --- | --- |
@@ -80,7 +81,7 @@ dotnet run --project src/PortableAgent.Console -- reject <run-id> <approval-id>
 
 [Phase 4B 验证记录](docs/phase4b-verification.md) 包含实际进程输出、SQLite 表结构、测试结果与边界说明。
 
-## Phase 7A：启动 Developer Studio
+## 启动 Developer Studio（Phase 7A / 7B）
 
 需要 .NET 10 SDK 和 Node.js（已验证 **22.22.1 / npm 10.9.4**）。先在根目录执行 `dotnet build PortableAgent.sln`，再分别打开终端，从根目录启动：
 
@@ -109,7 +110,7 @@ npm run dev
 - `Cancel run` 仅在 Running 且最新可用快照确认本宿主仍在执行时显示。202 显示 Cancelling，收到终态后才显示 Cancelled；不代表业务回滚。
 - 普通 SSE 断连交给 EventSource 原生重连；解析错误关闭连接并查询状态，可显式从最后一个精确 Sequence 重连。每 12 秒的非重叠 GET 仅做安全同步，不替代执行事件。
 - `/api/agents` 加载失败保留页面并显示 API unavailable 和 Retry。启动 POST 结果未知时不自动重发，保留消息与重复执行风险提示，需要显式释放当前任务后才可再次发送。
-- Completed 的最终回答来自 GET Run，以普通文本显示在执行卡片下面，成功读取后只自动折叠一次。无模型 token 流、隐藏推理、Trace / Tools / Graph 页面。
+- Completed 的最终回答来自 GET Run，以普通文本显示在执行卡片下面，成功读取后只自动折叠一次。无模型 token 流或隐藏推理展示；内联 Show details 继续保留。
 
 前端验证：
 
@@ -124,6 +125,19 @@ npm run test:e2e
 浏览器测试运行前先停止手动启动的四个开发服务，且在仓库根目录完成 Debug `dotnet build`。Playwright 自动启动真实 Pet/Flight MCP、API、Vite，使用独立 `TestResults/phase7a-*.db`，结束后停止测试服务；不复用已有进程。测试输出与截图在 Studio 的 `test-results/`，不纳入 Git。
 
 [Phase 7A 验证记录](docs/phase7a-verification.md) 包含依赖精确版本、状态与竞态设计、49 项前端测试、2 项浏览器验收及 SSE 增量证据。
+
+## Phase 7B：检查实际执行
+
+- 桌面左侧及窄屏紧凑导航均提供 **Chat / Trace / Graph / Tools**。采用内部视图状态，不使用 Router；Chat 与 RunController 持续挂载，保留草稿、阅读位置、卡片和 details 展开及审批状态。
+- 三个检查视图共用已绑定 RunId 的 Run 选择器，以 clientId 选择。首个 Run 默认选中，此后新 Run 不抢走当前检查目标。无 Run 时显示 Go to Chat；刷新仍清空 Studio 历史。
+- **Trace** 每行对应一条收到的 ExecutionEvent，按精确 Sequence 升序，允许空洞与去重。提供 All / Lifecycle / Model / Tools / Policy / Approval，键盘展开原始事件；未知事件仍在 All 中。用户阅读旧事件时不强制滚到底部。GET 已终止而终止事件未收到时分开显示，不补造事件。
+- **Graph** 使用固定版本 `@xyflow/react` **12.12.0**，展示 Run Start、Tool Discovery、Model Turn、Tool Operation、Approval、Run Resume、Terminal 七种实际执行节点。实线代表观察支持的关系，虚线仅代表执行观察顺序，不代表数据依赖；批次工具是兄弟节点。支持平移、缩放、选择和 Fit graph，不可编辑。
+- Flight 审批前后同一个 CallId 显示为两个操作阶段，只有一次模型提案。重复 CallId 的提案保留独立观察并标记歧义；缺少执行证据时使用保守状态，不猜测跳过原因或隐藏推理。节点详情可追溯到原事件，实时更新不自动重置用户视角。
+- **Tools** 通过唯一新增的只读 `GET /api/runs/{runId}/tools` 读取持久化 RunState.ToolCatalog，展示可信 ToolId、ModelName、说明和可展开/复制的 Schema。目录读取不联系 MCP、不做 tools/list，源服务离线仍可检查已保存目录。
+- 目录状态与 snapshotSequence 和当前观察状态分开。Running 空目录表示“尚未持久化可用”，非空目录可能来自较早检查点；终态空目录只说明该快照未保存目录。恢复后目录可能被重新发现的结果替换，不提供历史 Schema 版本。
+- 工具使用记录来自共享事件模型，标记 **Observed policy in this Run**，保留多次策略和审批观察，分别统计执行开始、完成和返回失败。优先按事件中的可信身份关联，其次唯一名称匹配；歧义留作未关联观察。Tools 只有检查与刷新，**没有手动执行工具或编辑参数入口**。
+
+[Phase 7B 验证记录](docs/phase7b-verification.md) 包含 API 契约、边界检查、93 项前端测试、276 项后端测试与真实 Flight / Pet 跨视图验收证据。
 
 ## 项目结构与依赖
 
@@ -164,6 +178,10 @@ src/
     src/api/              HTTP DTO、ProblemDetails、原生 EventSource
     src/features/agents/  API Agent 列表与选择器
     src/features/run/     UI 状态、纯 reducer、控制器、分组投影、审批与消息
+    src/features/inspection/  共享事件解释与检查视图协调
+    src/features/trace/   精确时间线、分类与原始事件
+    src/features/graph/   只读实际执行图、纯投影与布局
+    src/features/tools/   独立目录查询缓存、Schema 与观察使用记录
     src/components/       页面外壳和连接状态
     src/styles/           CSS 变量、布局、窄屏和 reduced-motion
     src/test/             Vitest / RTL 辅助
@@ -216,6 +234,7 @@ Pet 演示需另启 `dotnet run --project samples/PortableAgent.Sample.PetBoardi
 | `GET /api/agents` | 200 | 仅公开 Agent id、name |
 | `POST /api/runs` | 202 + Location | Run 与 RunStarted 已提交 |
 | `GET /api/runs/{runId}` | 200 | 持久化状态 DTO，附当前宿主 isActive |
+| `GET /api/runs/{runId}/tools` | 200 | 持久化目录 DTO：runId、status、snapshotSequence、tools；不重新发现工具 |
 | `POST /api/runs/{runId}/approvals/{approvalId}` | 202 + Location | 批准或拒绝的 CAS 已提交；执行可以尚未完成 |
 | `POST /api/runs/{runId}/cancel` | 202 + Location | 已向当前宿主活动执行发出取消信号 |
 
@@ -542,9 +561,9 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 ## 测试与阅读顺序
 
-`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**268 通过，0 失败，0 跳过**。
+`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**276 通过，0 失败，0 跳过**。
 
-Phase 7A 前端：`npm run build` 通过，`npm test` **49 通过**，`npm run test:e2e` **2 通过**。Core / Persistence / MCP adapter / API 生产文件均为 0 变更。
+Phase 7B 前端：`npm run build` 通过，`npm test` **93 通过**，`npm run test:e2e` **2 通过**（扩展原有真实浏览器流程）。原 Phase 7A 的 49 项前端与 268 项后端基线保留；新增 44 项前端与 8 项 API 测试。Core / Persistence / MCP adapter / Infrastructure 生产文件均为 0 变更；API 仅新增 DTO 文件并修改既有端点文件。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
@@ -552,7 +571,7 @@ Phase 7A 前端：`npm run build` 通过，`npm test` **49 通过**，`npm run t
 | IntegrationTests | 40 | 领域迁移、策略、批次、内存审批与并发 |
 | Persistence.Tests | 49 | DTO、新 disposition 往返、独立 Store、重启批准/拒绝、SQLite CAS、事务故障 |
 | Adapters.Mcp.Tests | 72 | 协议适配、领域迁移、审批恢复、真实工具失败恢复及远端副作用不确定性 |
-| Api.Tests | 66 | 提交确认、独立执行、SSE 回放/连续审批/断连/溢出恢复、资源释放、真实 Flight MCP |
+| Api.Tests | 74 | 提交确认、独立执行、SSE 回放/连续审批/断连/溢出恢复、资源释放、真实 Flight MCP、只读与离线目录 |
 
 Phase 6B 在 Phase 6A 的 234 项基线上新增 34 项 API 测试，原测试保持通过；只将旧测试中“无 SSE”的名称调整为未知 Run 的 404 行为。持久化与 API 测试使用独立临时文件数据库，不复用演示数据库。API 测试通过真实 Kestrel HTTP 连接与受控模型/工具验证异步边界，并用受控响应 Stream 确认溢出会中断阻塞写入；持久化事务故障测试通过 SQLite trigger 注入真实回滚。
 
@@ -562,7 +581,7 @@ Phase 6B 在 Phase 6A 的 234 项基线上新增 34 项 API 测试，原测试�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 7B（尚未实现） | Developer Studio：Trace / Tools / Graph，另行设计与批准 |
+| 后续另行设计与批准 | 真实模型、Session / 历史恢复或配置能力；不属于已完成的 Phase 7B |
 | 后续按需 | MCP 多来源、别名、认证、富内容、超时/连接生命周期及并发增强 |
 
 Phase 5A 已实现可信单来源绑定、名称一致性和参数对象检查；通用 Schema 校验、凭据/资源授权与远程副作用恢复仍待后续设计。RuntimeDefinitionId 由配置方维护。未实现多 Agent、RAG、向量数据库、分布式执行、动态插件或工作流图引擎。

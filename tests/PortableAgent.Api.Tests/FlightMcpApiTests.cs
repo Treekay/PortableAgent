@@ -19,6 +19,30 @@ namespace PortableAgent.Api.Tests;
 public sealed class FlightMcpApiTests
 {
     [Fact]
+    public async Task Persisted_catalog_is_readable_with_MCP_offline_and_has_no_business_or_discovery_side_effect()
+    {
+        using var db = new DatabaseFile();
+        await using var flight = await FlightServer.StartAsync();
+        await using var api = await ApiTestHost.StartAsync(db, flightEndpoint: flight.Endpoint);
+        var id = await api.StartRunAsync("Cancel my booking.", "flight");
+        await api.WaitAsync(id, "AwaitingApproval");
+        var before = (await db.Store.GetAsync(id, default))!;
+        var beforeEvents = await db.Store.ReadEventsAfterAsync(id, 0, 1000, default);
+        var discoveries = flight.Requests.Count(r => r.GetProperty("method").GetString() == "tools/list");
+        await flight.StopAsync();
+        var dto = (await api.Client.GetFromJsonAsync<RunToolsDto>($"/api/runs/{id}/tools"))!;
+        Assert.Equal(new[] { "cancel_booking", "get_booking" }, dto.Tools.Select(t => t.ModelName).Order());
+        Assert.Equal("AwaitingApproval", dto.Status);
+        Assert.Equal(discoveries, flight.Requests.Count(r => r.GetProperty("method").GetString() == "tools/list"));
+        Assert.Equal(0, flight.State.CancelCallCount);
+        Assert.Equal(0, flight.State.CancelMutationCount);
+        Assert.Equal("confirmed", flight.State.GetBooking("NZ123").Status);
+        var after = (await db.Store.GetAsync(id, default))!;
+        Assert.Equal(before.Version, after.Version);
+        Assert.Equal(before.LastSequence, after.LastSequence);
+        Assert.Equal(beforeEvents.Count, (await db.Store.ReadEventsAfterAsync(id, 0, 1000, default)).Count);
+    }
+    [Fact]
     public async Task Flight_approval_is_observed_on_one_continuous_SSE_connection()
     {
         using var db = new DatabaseFile();
@@ -89,6 +113,7 @@ public sealed class FlightMcpApiTests
     // Real sample handlers, official MCP transport and a separate Kestrel listener; no local executor.
     private sealed class FlightServer(WebApplication app, FlightBookingState state, ConcurrentQueue<JsonElement> requests, string endpoint) : IAsyncDisposable
     {
+        public Task StopAsync() => app.StopAsync();
         public FlightBookingState State { get; } = state;
         public ConcurrentQueue<JsonElement> Requests { get; } = requests;
         public string Endpoint { get; } = endpoint;

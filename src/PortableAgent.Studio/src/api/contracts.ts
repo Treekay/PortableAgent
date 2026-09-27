@@ -1,4 +1,8 @@
 export interface AgentDto { id: string; name: string }
+export interface ToolCatalogEntryDto {
+  toolId: { sourceId: string; name: string }; modelName: string; description: string; inputSchema: unknown;
+}
+export interface RunToolsDto { runId: string; status: RuntimeStatus; snapshotSequence: number; tools: ToolCatalogEntryDto[] }
 export type RuntimeStatus = 'Running' | 'AwaitingApproval' | 'Completed' | 'Failed' | 'Cancelled' | 'LimitReached';
 export const terminal = (status?: RuntimeStatus) => !!status && ['Completed', 'Failed', 'Cancelled', 'LimitReached'].includes(status);
 export interface AcceptedDto { runId: string; status: 'accepted'; runUrl: string; eventsUrl: string; approvalId?: string }

@@ -8,7 +8,7 @@ export const snapshot = (values: Partial<RunDto> = {}): RunDto => ({ runId, agen
 export const event = (id: string, eventType: string, payload: Record<string, unknown> = {}): ExecutionEvent => ({ id, sequence: Number(id), eventId: `event-${id}`, runId, eventType, occurredAt: '2026-09-27T08:00:00Z', payload });
 export const deferred = <T,>() => { let resolve!: (value: T) => void, reject!: (reason: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 export function fakeApi(): PortableAgentApi {
-  return { listAgents: vi.fn().mockResolvedValue([{ id: 'flight', name: 'Flight Booking' }]), startRun: vi.fn().mockResolvedValue(ack),
+  return { getRunTools: vi.fn().mockResolvedValue({ runId, status: 'Running', snapshotSequence: 1, tools: [] }), listAgents: vi.fn().mockResolvedValue([{ id: 'flight', name: 'Flight Booking' }]), startRun: vi.fn().mockResolvedValue(ack),
     getRun: vi.fn().mockResolvedValue(snapshot()), submitApproval: vi.fn().mockResolvedValue({ ...ack, approvalId: approval.approvalId }), cancelRun: vi.fn().mockResolvedValue(ack) };
 }
 export class FakeSource {

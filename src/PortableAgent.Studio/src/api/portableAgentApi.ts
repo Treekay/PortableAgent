@@ -1,4 +1,4 @@
-import type { AcceptedDto, AgentDto, RunDto } from './contracts';
+import type { AcceptedDto, AgentDto, RunDto, RunToolsDto } from './contracts';
 
 export class ApiError extends Error {
   constructor(message: string, public kind: 'http' | 'network' | 'protocol', public status?: number, public code?: string) { super(message); }
@@ -29,6 +29,7 @@ async function command(url: string, body?: unknown) {
   return result;
 }
 export const portableAgentApi = {
+  getRunTools: (id: string, signal?: AbortSignal) => request<RunToolsDto>(`/api/runs/${id}/tools`, { signal }),
   listAgents: (signal?: AbortSignal) => request<AgentDto[]>('/api/agents', { signal }),
   startRun: (agentId: string, message: string) => command('/api/runs', { agentId, message }),
   getRun: (id: string, signal?: AbortSignal) => request<RunDto>(`/api/runs/${id}`, { signal }),
