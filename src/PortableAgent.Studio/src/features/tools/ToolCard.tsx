@@ -9,9 +9,10 @@ export function ToolCard({ tool, observations }: { tool: ToolCatalogEntryDto; ob
     <ToolSchema schema={tool.inputSchema} />
     <div className="tool-observations"><h4>Observed usage in this Run</h4>{!observations.length ? <p>No associated usage observed. No policy evaluation observed.</p> : observations.map(({ call, association }) => <section key={call.callId}>
       <p><code>{call.callId}</code> · {association}</p>
-      <p>Proposal observations: {call.proposals.length}</p>
+      <p>Proposals observed: {call.proposals.length}</p>
       <h5>Observed policy in this Run</h5>
       {call.policyEvaluations.some(o => o.event.eventType === 'PolicyEvaluationCompleted') ? <ul>{call.policyEvaluations.filter(o => o.event.eventType === 'PolicyEvaluationCompleted').map(o => <li key={o.event.id}>#{o.event.id} · {field(o.event, 'outcome') ?? 'Not provided'}{field(o.event, 'policyId') ? ` · ${field(o.event, 'policyId')}` : ''}</li>)}</ul> : <p>No policy evaluation observed</p>}
+      <p>Approvals observed: {new Set(call.approvalObservations.flatMap(o => o.approvalId ? [o.approvalId] : [])).size} <span className="muted">(distinct approval IDs)</span></p>
       {call.approvalObservations.length > 0 && <ul aria-label="Approval observations">{call.approvalObservations.map(o => <li key={o.event.id}>#{o.event.id} · {o.event.eventType === 'ApprovalRequired' ? 'Approval required' : field(o.event, 'status') ?? 'Not provided'}</li>)}</ul>}
       <p>Execution starts observed: {call.executionStarts.length}</p><p>Execution completions observed: {call.executionCompletions.length}</p>
       <p>Returned failures: {call.executionCompletions.filter(o => o.event.payload.success === false).length}</p>

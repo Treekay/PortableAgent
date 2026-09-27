@@ -2,6 +2,8 @@
 
 验证日期：2026-09-27（Pacific/Auckland）。基线：Phase 7A `d4f52e09b515ad62d08bb5888a0b9e35b1bc46d8`。
 
+按新版批准附件复核：既有 Phase 7B 提交为 `70175f1199ce0f85c6e3427c51910f810b8f3e3b`。补齐 Proposals observed / Approvals observed 计数措辞，并增加无标识 RunResumed 不推断审批因果关系的回归测试；无新增后端变更。
+
 ## 范围与生产边界
 
 只实施 Phase 7B。没有 Session、Run 历史查询/刷新恢复、目录版本历史、配置编辑、手动工具执行、认证、真实 LLM、token streaming 或部署。
@@ -71,6 +73,7 @@ Graph 的七类节点是 Run Start、Tool Discovery、Model Turn、Tool Operatio
 
 - 实线：有观察支持的 model→proposal、operation→approval 关系；不表示模型隐藏推理。
 - 虚线：执行观察顺序；不表示数据依赖。
+- RunResumed 没有 callId / approvalId；恢复节点不补造身份，其相邻边保持观察顺序。测试包含多个候选审批，确认没有生成精确因果关系。
 - 一个模型响应的多个工具为兄弟节点，不画 A→B→C，不宣称并行执行。
 - 操作显示身份包含 RunId、阶段、锚点 Sequence、CallId；重复提案不合并。批准后是同一逻辑调用的恢复执行阶段，不是第二次模型提案，也没有回边或第二个 Run Start。
 - 状态区分 Waiting approval、Blocked by policy、Completion not observed、Execution not observed yet、Not executed、Execution not observed、Returned failure。Not executed 只描述该阶段没有观察到开始，不表示整个逻辑调用从未执行。问题流使用保守标签；不编造 prior-failure skip。工具返回失败不等于 RunFailed。
@@ -93,6 +96,8 @@ Graph 的七类节点是 Run Start、Tool Discovery、Model Turn、Tool Operatio
 
 分别统计 Execution starts observed、Execution completions observed、Returned failures；开始不等于业务成功，未使用目录工具也可查看。
 
+Proposals observed 统计提案事件；Approvals observed 统计已观察到的不同 ApprovalId，并明确标注 distinct approval IDs。一次 ApprovalRequired 和同一 ID 的 ApprovalResolved 合计一个审批，两条原始观察都保留；缺失 ID 的观察不被猜测为新的审批。
+
 目录查询拥有独立 runId 缓存、请求 generation、每 Run 单个在途请求和合并刷新。首次进入 Tools、显式 Refresh、相关生命周期/快照检查点变化触发读取，不逐事件请求。旧响应不替换较新 snapshotSequence 或其他选中 Run 的显示；失败保留已有目录并显示错误。API long 在当前 JSON 契约中仍是 number，超出 JavaScript 安全整数范围的 snapshotSequence 被拒绝，避免错误比较；SSE Sequence 继续精确处理。
 
 ## 自动验证
@@ -102,21 +107,21 @@ Graph 的七类节点是 Run Start、Tool Discovery、Model Turn、Tool Operatio
 | 命令 | 结果 |
 | --- | --- |
 | `npm install --save-exact @xyflow/react@12.12.0` | 成功，lockfile 更新，audit 0 |
-| `npm test` | 15 文件、93 测试通过；保留原 49，新增 44 |
+| `npm test` | 15 文件、94 测试通过；保留原 49，新增 45 |
 | `npm run build` | TypeScript 与 Vite 成功 |
-| `npm run test:e2e` | 2 个扩展的真实浏览器流程通过，16.8 秒 |
+| `npm run test:e2e` | 2 个扩展的真实浏览器流程通过 |
 | `dotnet build PortableAgent.sln` | 0 警告、0 错误 |
 | `dotnet test PortableAgent.sln` | 276 通过，0 失败、0 跳过 |
 
 后端分布：Core 41、Integration 40、Persistence 49、MCP 72、API 74（基线 66，新增 8）。没有以 mock-only 浏览器替代真实验收。
 
-新增前端覆盖：共享解释 12、Graph 投影 12、Tools 关联 3、Tools 缓存 4、Trace UI 2、Tools UI 5、GraphInspector 1、跨视图 3、Graph UI 2。包含 BigInt/空洞/去重、原始 payload 一致性、过滤/键盘/滚动、歧义保留、审批恢复、批次、业务失败、相机稳定、只读属性、目录时效及竞态。Graph UI 测试隔离 React Flow 边界，不测试库内部；真实浏览器另验证不能拖动或删除节点。
+新增前端覆盖：共享解释 12、Graph 投影 13、Tools 关联 3、Tools 缓存 4、Trace UI 2、Tools UI 5、GraphInspector 1、跨视图 3、Graph UI 2。包含 BigInt/空洞/去重、原始 payload 一致性、过滤/键盘/滚动、歧义保留、审批恢复、批次、业务失败、相机稳定、只读属性、目录时效及竞态。Graph UI 测试隔离 React Flow 边界，不测试库内部；真实浏览器另验证不能拖动或删除节点。
 
 ## 真实 Flight / Pet 浏览器结果
 
 Playwright 自动启动真实 Pet / Flight MCP、API、Vite，使用独立 SQLite。浏览器通过 localhost:5173 `/api` 代理和原生 EventSource，不 mock HTTP/SSE。保留原先先拒绝、再批准，以及 Pet 读取后拒绝策略的回归步骤。
 
-最终 Flight 批准 RunId：`cf279cfe-207c-4339-adc6-508e59f30db8`。
+最终 Flight 批准 RunId：`f7302fdf-ccd2-468c-9e1a-7f5fb293a7dd`。
 
 | 检查点 | 结果 |
 | --- | --- |

@@ -137,7 +137,7 @@ npm run test:e2e
 - 目录状态与 snapshotSequence 和当前观察状态分开。Running 空目录表示“尚未持久化可用”，非空目录可能来自较早检查点；终态空目录只说明该快照未保存目录。恢复后目录可能被重新发现的结果替换，不提供历史 Schema 版本。
 - 工具使用记录来自共享事件模型，标记 **Observed policy in this Run**，保留多次策略和审批观察，分别统计执行开始、完成和返回失败。优先按事件中的可信身份关联，其次唯一名称匹配；歧义留作未关联观察。Tools 只有检查与刷新，**没有手动执行工具或编辑参数入口**。
 
-[Phase 7B 验证记录](docs/phase7b-verification.md) 包含 API 契约、边界检查、93 项前端测试、276 项后端测试与真实 Flight / Pet 跨视图验收证据。
+[Phase 7B 验证记录](docs/phase7b-verification.md) 包含 API 契约、边界检查、94 项前端测试、276 项后端测试与真实 Flight / Pet 跨视图验收证据。
 
 ## 项目结构与依赖
 
@@ -563,7 +563,7 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 `dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**276 通过，0 失败，0 跳过**。
 
-Phase 7B 前端：`npm run build` 通过，`npm test` **93 通过**，`npm run test:e2e` **2 通过**（扩展原有真实浏览器流程）。原 Phase 7A 的 49 项前端与 268 项后端基线保留；新增 44 项前端与 8 项 API 测试。Core / Persistence / MCP adapter / Infrastructure 生产文件均为 0 变更；API 仅新增 DTO 文件并修改既有端点文件。
+Phase 7B 前端：`npm run build` 通过，`npm test` **94 通过**，`npm run test:e2e` **2 通过**（扩展原有真实浏览器流程）。原 Phase 7A 的 49 项前端与 268 项后端基线保留；新增 45 项前端与 8 项 API 测试。Core / Persistence / MCP adapter / Infrastructure 生产文件均为 0 变更；API 仅新增 DTO 文件并修改既有端点文件。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |

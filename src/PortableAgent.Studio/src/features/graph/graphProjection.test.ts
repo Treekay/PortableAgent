@@ -22,6 +22,18 @@ describe('actual execution graph', () => {
     expect(graph.nodes.filter(n => n.kind === 'Tool Operation')).toHaveLength(1); expect(graph.nodes.some(n => n.kind === 'Approval')).toBe(false);
     expect(JSON.stringify(graph)).not.toMatch(/Thinking|Reasoning|Thoughts|Skipped due to prior failure/);
   });
+  it('does not invent an approval identity or causal relation for a payload-free resume', () => {
+    const graph = project([
+      event('1', 'ApprovalResolved', { callId: 'a', approvalId: 'approval-a', status: 'Approved' }),
+      event('2', 'ApprovalResolved', { callId: 'b', approvalId: 'approval-b', status: 'Approved' }),
+      event('3', 'RunResumed'), event('4', 'ToolDiscoveryStarted'),
+    ]);
+    const resume = graph.nodes.find(n => n.kind === 'Run Resume')!;
+    expect(resume.callId).toBeUndefined(); expect(resume.approvalId).toBeUndefined();
+    const edges = graph.edges.filter(e => e.source === resume.id || e.target === resume.id);
+    expect(edges).toHaveLength(2); expect(edges.every(e => e.meaning === 'order')).toBe(true);
+    expect(resume.events[0].event.payload).toEqual({});
+  });
   it('retains rejection and no execution', () => {
     const events = flightEvents().filter(e => BigInt(e.id) <= 13n || BigInt(e.id) >= 18n).map(e => e.eventType === 'ApprovalResolved' ? { ...e, payload: { ...e.payload, status: 'Rejected' } } : e);
     const graph = project(events);

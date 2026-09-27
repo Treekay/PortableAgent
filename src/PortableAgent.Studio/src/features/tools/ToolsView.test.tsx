@@ -13,6 +13,9 @@ it('separates trusted definitions, schema and observed policy/approval/counts', 
   fireEvent.click(card.getByText('Input schema', { exact: true })); expect(card.getByLabelText('Input schema JSON').textContent).toBe(JSON.stringify(dto.tools[1].inputSchema, null, 2));
   await user.click(card.getByRole('button', { name: 'Copy schema' })); expect(copy).toHaveBeenCalledWith(JSON.stringify(dto.tools[1].inputSchema, null, 2));
   expect(card.getByText('Observed policy in this Run')).toBeVisible(); expect(card.getAllByText(/RequireApproval/)).toHaveLength(2); expect(card.getByText(/Approved/)).toBeVisible();
+  expect(card.getByText('Proposals observed: 1')).toBeVisible();
+  expect(card.getByText('Approvals observed: 1', { exact: false })).toHaveTextContent('distinct approval IDs');
+  expect(within(card.getByRole('list', { name: 'Approval observations' })).getAllByRole('listitem')).toHaveLength(2);
   expect(card.getByText('Execution starts observed: 1')).toBeVisible(); expect(card.getByText('Execution completions observed: 1')).toBeVisible(); expect(card.getByText('Returned failures: 1')).toBeVisible();
   expect(screen.getByText('No associated usage observed. No policy evaluation observed.')).toBeVisible();
   expect(screen.queryByRole('button', { name: /^(Run tool|Try tool|Execute|Test tool)$/i })).not.toBeInTheDocument();
