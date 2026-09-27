@@ -15,11 +15,13 @@ public sealed class AgentRunner
     private readonly IExecutionEventSink _events;
     private readonly IPolicyEvaluator _policy;
     private readonly IRunStateStore? _store;
-    private readonly Guid _runtimeId = Guid.NewGuid();
+    private readonly string _runtimeDefinitionId;
 
-    public AgentRunner(IModelProvider model, IToolProvider tools, IToolExecutor executor, RunLimits limits,
+    public AgentRunner(string runtimeDefinitionId, IModelProvider model, IToolProvider tools, IToolExecutor executor, RunLimits limits,
         IExecutionEventSink? eventSink = null, IPolicyEvaluator? policyEvaluator = null, IRunStateStore? runStore = null)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(runtimeDefinitionId);
+        _runtimeDefinitionId = runtimeDefinitionId;
         ArgumentNullException.ThrowIfNull(model);
         ArgumentNullException.ThrowIfNull(tools);
         ArgumentNullException.ThrowIfNull(executor);
@@ -34,7 +36,7 @@ public sealed class AgentRunner
 
     public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default)
     {
-        var state = new RunState { RunId = Guid.NewGuid(), RuntimeId = _runtimeId, Limits = _limits };
+        var state = new RunState { RunId = Guid.NewGuid(), RuntimeDefinitionId = _runtimeDefinitionId, Limits = _limits };
         return new RunExecution(this, state, cancellationToken, stored: false).StartAsync(request);
     }
 
@@ -46,7 +48,9 @@ public sealed class AgentRunner
         if (_store is null) return new(ApprovalSubmissionStatus.NotFound);
         var state = await _store.GetAsync(command.RunId, cancellationToken);
         if (state is null) return new(ApprovalSubmissionStatus.NotFound);
-        if (state.RuntimeId != _runtimeId || state.Lifecycle != RunLifecycleState.AwaitingApproval
+        // Running records are history only: no automatic recovery after a crash following a successful CAS.
+        if (!string.Equals(state.RuntimeDefinitionId, _runtimeDefinitionId, StringComparison.Ordinal)
+            || state.Lifecycle != RunLifecycleState.AwaitingApproval
             || state.PendingApproval is not { Status: ApprovalStatus.Pending } pending
             || pending.ApprovalId != command.ApprovalId
             || !Enum.IsDefined(command.Decision))
@@ -61,11 +65,17 @@ public sealed class AgentRunner
         state.Lifecycle = RunLifecycleState.Running;
         state.PendingApproval = null;
         state.ResolvedApprovals.Add(resolved.Snapshot());
-        if (!await _store.TryReplaceAsync(state.RunId, expectedVersion, state, cancellationToken))
+        var approvalEvents = new[]
+        {
+            NewEvent(state, ExecutionEventType.ApprovalResolved,
+                new { approvalId = resolved.ApprovalId, callId = resolved.ToolCall.CallId, status = resolved.Status.ToString() }),
+            NewEvent(state, ExecutionEventType.RunResumed, new { })
+        };
+        if (!await _store.TryReplaceAsync(state.RunId, expectedVersion, state, approvalEvents, cancellationToken))
             return new(ApprovalSubmissionStatus.Conflict);
 
         // Only the CAS winner can enter execution. No cancellation check may undo this transition.
-        var result = await new RunExecution(this, state, cancellationToken, stored: true).ResumeAsync(resolved);
+        var result = await new RunExecution(this, state, cancellationToken, stored: true).ResumeAsync(resolved, approvalEvents);
         return new(ApprovalSubmissionStatus.Accepted, result);
     }
 
@@ -75,19 +85,36 @@ public sealed class AgentRunner
         private readonly SafeExecutionEventSink _sink = new(owner._events, token);
         private bool _stored = stored;
 
-        private ExecutionEvent CreateEvent(ExecutionEventType type, object payload) =>
-            new(Guid.NewGuid(), state.RunId, ++state.LastSequence, DateTimeOffset.UtcNow,
-                type, JsonSerializer.SerializeToElement(payload));
+        private ExecutionEvent CreateEvent(ExecutionEventType type, object payload) => NewEvent(state, type, payload);
 
-        private ValueTask EmitAsync(ExecutionEventType type, object payload, bool bookkeeping = false) =>
-            _sink.PublishAsync(CreateEvent(type, payload), bookkeeping ? CancellationToken.None : token);
+        private async ValueTask EmitAsync(ExecutionEventType type, object payload)
+        {
+            var executionEvent = CreateEvent(type, payload);
+            if (owner._store is not null)
+            {
+                try { await owner._store.AppendEventAsync(executionEvent, token); }
+                catch (Exception ex) when (type == ExecutionEventType.ToolExecutionCompleted
+                    && !(ex is OperationCanceledException && token.IsCancellationRequested))
+                {
+                    throw new IOException("Tool returned; its business side effect may already have happened. "
+                        + "Persisting ToolExecutionCompleted failed; the tool was not retried.", ex);
+                }
+            }
+            await _sink.PublishAsync(executionEvent, token);
+        }
 
         public async Task<AgentRunResult> StartAsync(AgentRunRequest request)
         {
             AgentRunResult result;
-            await EmitAsync(ExecutionEventType.RunStarted, new { });
             try
             {
+                var started = CreateEvent(ExecutionEventType.RunStarted, new { });
+                if (owner._store is not null)
+                {
+                    await owner._store.CreateAsync(state, [started], token);
+                    _stored = true;
+                }
+                await _sink.PublishAsync(started, token);
                 token.ThrowIfCancellationRequested();
                 await DiscoverAsync();
                 state.Conversation.Add(AgentMessage.User(request.UserMessage));
@@ -98,17 +125,17 @@ public sealed class AgentRunner
             return await FinishAsync(result);
         }
 
-        public async Task<AgentRunResult> ResumeAsync(PendingApproval resolved)
+        public async Task<AgentRunResult> ResumeAsync(PendingApproval resolved, IReadOnlyList<ExecutionEvent> committedEvents)
         {
             AgentRunResult result;
             // These facts follow a successful CAS even if the caller cancels immediately afterwards.
-            await EmitAsync(ExecutionEventType.ApprovalResolved,
-                new { approvalId = resolved.ApprovalId, callId = resolved.ToolCall.CallId, status = resolved.Status.ToString() },
-                bookkeeping: true);
-            await EmitAsync(ExecutionEventType.RunResumed, new { }, bookkeeping: true);
+            foreach (var executionEvent in committedEvents)
+                await _sink.PublishAsync(executionEvent, CancellationToken.None);
             try
             {
                 token.ThrowIfCancellationRequested();
+                // Rebuild trusted capabilities even after rejection: the model may propose another tool next.
+                await DiscoverAsync();
                 if (resolved.Status == ApprovalStatus.Rejected)
                 {
                     AppendNonExecuted(resolved.ToolCall, ToolResultDisposition.RejectedByUser, "User rejected this operation.");
@@ -116,7 +143,6 @@ public sealed class AgentRunner
                 }
                 else
                 {
-                    await DiscoverAsync();
                     var current = state.ToolCatalog.SingleOrDefault(tool => tool.Id == resolved.ToolDefinition.Id);
                     if (current is null || current.ModelName != resolved.ToolDefinition.ModelName
                         || !JsonElement.DeepEquals(current.InputSchema, resolved.ToolDefinition.InputSchema))
@@ -277,22 +303,17 @@ public sealed class AgentRunner
             var approvalEvent = CreateEvent(ExecutionEventType.ApprovalRequired,
                 new { approvalId = state.PendingApproval.ApprovalId, callId = call.CallId, policyId = decision.PolicyId });
             // Snapshot includes the reserved sequence. A failed save must never report AwaitingApproval.
-            if (_stored) await ReplaceStoredAsync(token);
-            else
-            {
-                await owner._store.CreateAsync(state, token);
-                _stored = true;
-            }
+            await ReplaceStoredAsync([approvalEvent], token);
             await _sink.PublishAsync(approvalEvent, token);
             return new(RunStatus.AwaitingApproval) { RunId = state.RunId, PendingApproval = state.PendingApproval.Snapshot() };
         }
 
-        private async Task ReplaceStoredAsync(CancellationToken cancellationToken)
+        private async Task ReplaceStoredAsync(IReadOnlyList<ExecutionEvent> events, CancellationToken cancellationToken)
         {
             var previous = state.Version;
             var replacement = state.Snapshot();
             replacement.Version = previous + 1;
-            if (!await owner._store!.TryReplaceAsync(state.RunId, previous, replacement, cancellationToken))
+            if (!await owner._store!.TryReplaceAsync(state.RunId, previous, replacement, events, cancellationToken))
                 throw new InvalidOperationException("Stored Run version conflict.");
             state.Version = replacement.Version;
         }
@@ -313,22 +334,22 @@ public sealed class AgentRunner
                 new { status = result.Status.ToString(), modelTurns = state.ModelTurns, toolCalls = state.ToolCalls });
             if (_stored)
             {
-                try { await ReplaceStoredAsync(CancellationToken.None); }
+                try { await ReplaceStoredAsync([terminal], CancellationToken.None); }
                 catch (Exception exception)
                 {
-                    result = Failed(exception.Message) with { RunId = state.RunId };
-                    // No execution retry if storing final bookkeeping fails.
-                    terminal = terminal with
-                    {
-                        EventType = ExecutionEventType.RunFailed,
-                        Payload = JsonSerializer.SerializeToElement(new { status = "Failed", modelTurns = state.ModelTurns, toolCalls = state.ToolCalls })
-                    };
+                    // No live event without a durable event. Database may still show Running.
+                    return Failed($"Final persistence failed. {result.Error} {exception.Message}") with { RunId = state.RunId };
                 }
             }
-            await _sink.PublishAsync(terminal, CancellationToken.None);
+            if (owner._store is null || _stored)
+                await _sink.PublishAsync(terminal, CancellationToken.None);
             return result;
         }
     }
+
+    private static ExecutionEvent NewEvent(RunState state, ExecutionEventType type, object payload) =>
+        new(Guid.NewGuid(), state.RunId, ++state.LastSequence, DateTimeOffset.UtcNow,
+            type, JsonSerializer.SerializeToElement(payload));
 
     private static ExecutionEventType TerminalType(RunStatus status) => status switch
     {

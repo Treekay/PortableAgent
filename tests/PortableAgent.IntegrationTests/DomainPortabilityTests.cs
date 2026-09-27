@@ -30,7 +30,7 @@ public sealed class DomainPortabilityTests
             ? new PetBoardingToolExecutor() : new FlightBookingToolExecutor());
 
         // Only the three Infrastructure dependencies change; the Runner is always the same Core type.
-        var runner = new AgentRunner(model, tools, executor, new RunLimits());
+        var runner = new AgentRunner("test-runtime-v1", model, tools, executor, new RunLimits());
         var result = await runner.RunAsync(new AgentRunRequest(input));
 
         Assert.Equal(RunStatus.Completed, result.Status);
@@ -78,7 +78,7 @@ public sealed class DomainPortabilityTests
     {
         var tools = new RecordingToolProvider(new PetBoardingToolProvider());
         var executor = new RecordingExecutor(new PetBoardingToolExecutor());
-        var runner = new AgentRunner(new CrossDomainModel(), tools, executor, new RunLimits());
+        var runner = new AgentRunner("test-runtime-v1", new CrossDomainModel(), tools, executor, new RunLimits());
 
         var result = await runner.RunAsync(new AgentRunRequest("Attempt cross-domain call."));
 

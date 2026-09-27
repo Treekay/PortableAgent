@@ -21,7 +21,7 @@ public sealed class AgentRunnerTests
             ? Propose(Call()) : new("The result is 5.", [], ModelFinishReason.Completed));
         var tools = new TestToolProvider();
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, tools, executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, tools, executor, new()).RunAsync(Request);
 
         Assert.Equal(RunStatus.Completed, result.Status);
         Assert.Equal("The result is 5.", result.FinalText);
@@ -51,7 +51,7 @@ public sealed class AgentRunnerTests
     {
         var model = new RecordingModel(_ => Propose(Call(name: "invented_tool")));
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new()).RunAsync(Request);
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Contains("Unknown tool", result.Error!);
         Assert.Empty(executor.Calls);
@@ -66,7 +66,7 @@ public sealed class AgentRunnerTests
     {
         var model = new RecordingModel(request => Propose(Call($"call-{request.Messages.Count}")));
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, new TestToolProvider(), executor,
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor,
             new(maxTurns, maxTools)).RunAsync(Request);
         Assert.Equal(RunStatus.LimitReached, result.Status);
         Assert.Equal(expectedTurns, model.Requests.Count);
@@ -78,7 +78,7 @@ public sealed class AgentRunnerTests
     {
         var model = new RecordingModel(_ => Propose(Call()));
         var executor = new RecordingExecutor { Execute = call => new(call.CallId, false, Error: "Tool failed.") };
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new()).RunAsync(Request);
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Equal("Tool failed.", result.Error);
         Assert.Single(model.Requests);
@@ -91,7 +91,7 @@ public sealed class AgentRunnerTests
         var model = new RecordingModel(_ => Propose(Call()));
         var tools = new TestToolProvider();
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, tools, executor, new())
+        var result = await new AgentRunner("test-runtime-v1", model, tools, executor, new())
             .RunAsync(Request, new CancellationToken(true));
         Assert.Equal(RunStatus.Cancelled, result.Status);
         Assert.Equal(0, tools.Calls);
@@ -104,7 +104,7 @@ public sealed class AgentRunnerTests
     {
         var model = new RecordingModel(_ => Propose(Call()));
         var executor = new RecordingExecutor { Execute = _ => new("wrong-id", true) };
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new()).RunAsync(Request);
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Contains("CallId", result.Error!);
         Assert.Single(model.Requests);
@@ -122,7 +122,7 @@ public sealed class AgentRunnerTests
         var tools = new TestToolProvider { Definitions = [original, duplicate] };
         var model = new RecordingModel(_ => Propose(Call()));
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, tools, executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, tools, executor, new()).RunAsync(Request);
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Empty(model.Requests);
         Assert.Empty(executor.Calls);
@@ -135,7 +135,7 @@ public sealed class AgentRunnerTests
     {
         var model = new RecordingModel(request => Propose(Call(request.Messages.Count == 1 ? "call-1" : secondId)));
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new()).RunAsync(Request);
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Single(executor.Calls);
     }
@@ -145,7 +145,7 @@ public sealed class AgentRunnerTests
     {
         var model = new RecordingModel(_ => Propose(Call("one"), Call("two")));
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new(4, 1)).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new(4, 1)).RunAsync(Request);
         Assert.Equal(RunStatus.LimitReached, result.Status);
         Assert.Empty(executor.Calls);
     }
@@ -156,7 +156,7 @@ public sealed class AgentRunnerTests
         var model = new RecordingModel(request => request.Messages.Count == 1
             ? Propose(Call("one"), Call("two")) : new("Done.", [], ModelFinishReason.Completed));
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new()).RunAsync(Request);
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new()).RunAsync(Request);
         Assert.Equal(RunStatus.Completed, result.Status);
         Assert.Equal(new[] { "one", "two" }, executor.Calls.Select(item => item.Call.CallId));
         var messages = model.Requests[1].Messages;

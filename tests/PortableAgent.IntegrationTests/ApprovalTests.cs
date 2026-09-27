@@ -231,7 +231,7 @@ public sealed class ApprovalTests
     [Fact]
     public async Task Failed_pause_save_does_not_claim_the_run_is_resumable()
     {
-        var f = new Fixture(store: new StoreWrapper { FailCreate = true });
+        var f = new Fixture(store: new StoreWrapper { FailPause = true });
         var result = await f.Runner.RunAsync(new("input"));
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Null(result.PendingApproval);
@@ -300,7 +300,7 @@ public sealed class ApprovalTests
     public async Task Real_flight_components_understand_approval_and_rejection(ApprovalChoice choice, string text, int calls)
     {
         var executor = new RecordingExecutor(new FlightBookingToolExecutor());
-        var runner = new AgentRunner(new FlightBookingScriptedModelProvider(), new FlightBookingToolProvider(), executor,
+        var runner = new AgentRunner("test-runtime-v1", new FlightBookingScriptedModelProvider(), new FlightBookingToolProvider(), executor,
             new(), policyEvaluator: new InMemoryPolicyEvaluator(new Dictionary<ToolId, PolicyDecision>
             { [new("flight-local", "booking.cancel")] = new(PolicyOutcome.RequireApproval, "flight-confirm") }),
             runStore: new InMemoryRunStateStore());
@@ -315,7 +315,7 @@ public sealed class ApprovalTests
     public async Task Real_pet_components_explain_denial_and_explicit_policy_defaults_to_deny()
     {
         var executor = new RecordingExecutor(new PetBoardingToolExecutor());
-        var runner = new AgentRunner(new PetBoardingScriptedModelProvider(), new PetBoardingToolProvider(), executor,
+        var runner = new AgentRunner("test-runtime-v1", new PetBoardingScriptedModelProvider(), new PetBoardingToolProvider(), executor,
             new(), policyEvaluator: new InMemoryPolicyEvaluator(new Dictionary<ToolId, PolicyDecision>()));
         var result = await runner.RunAsync(new("Ask the staff to give Cooper some fresh water."));
         Assert.Equal(RunStatus.Completed, result.Status);
@@ -327,18 +327,18 @@ public sealed class ApprovalTests
     public async Task Store_copies_on_create_and_replace_and_rejects_stale_versions()
     {
         var store = new InMemoryRunStateStore();
-        var original = new RunState { RunId = Guid.NewGuid(), RuntimeId = Guid.NewGuid(), Limits = new() };
+        var original = new RunState { RunId = Guid.NewGuid(), RuntimeDefinitionId = "test-runtime-v1", Limits = new() };
         original.Conversation.Add(AgentMessage.User("original"));
-        await store.CreateAsync(original, CancellationToken.None);
+        await store.CreateAsync(original, [], CancellationToken.None);
         original.Conversation.Clear();
         var copy = (await store.GetAsync(original.RunId, CancellationToken.None))!;
         Assert.Single(copy.Conversation);
         copy.Version = 1;
         copy.ModelTurns = 2;
-        Assert.True(await store.TryReplaceAsync(copy.RunId, 0, copy, CancellationToken.None));
+        Assert.True(await store.TryReplaceAsync(copy.RunId, 0, copy, [], CancellationToken.None));
         copy.Conversation.Clear();
         copy.ModelTurns = 99;
-        Assert.False(await store.TryReplaceAsync(copy.RunId, 0, copy, CancellationToken.None));
+        Assert.False(await store.TryReplaceAsync(copy.RunId, 0, copy, [], CancellationToken.None));
         var retained = (await store.GetAsync(copy.RunId, CancellationToken.None))!;
         Assert.Single(retained.Conversation);
         Assert.Equal(2, retained.ModelTurns);
@@ -350,7 +350,7 @@ public sealed class ApprovalTests
     {
         var f = new Fixture();
         var paused = await f.PauseAsync();
-        var other = new AgentRunner(f.Model, f.Tools, f.Executor, new(), runStore: f.Store);
+        var other = new AgentRunner("other-runtime-v1", f.Model, f.Tools, f.Executor, new(), runStore: f.Store);
         Assert.Equal(ApprovalSubmissionStatus.Conflict, (await other.SubmitApprovalAsync(Command(paused))).Status);
         Assert.Empty(f.Executor.Calls);
         Assert.Equal(RunStatus.Completed, (await f.Runner.SubmitApprovalAsync(Command(paused))).RunResult!.Status);
@@ -373,7 +373,7 @@ public sealed class ApprovalTests
         public Fixture(RunLimits? limits = null, IRunStateStore? store = null)
         {
             Store = store ?? new InMemoryRunStateStore();
-            Runner = new(Model, Tools, Executor, limits ?? new(), Events, Policy, Store);
+            Runner = new("test-runtime-v1", Model, Tools, Executor, limits ?? new(), Events, Policy, Store);
         }
         public async Task<AgentRunResult> PauseAsync()
         {
@@ -431,10 +431,12 @@ public sealed class ApprovalTests
         private readonly TaskCompletionSource _readsReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _reads;
         public bool SynchronizeTwoReads { get; init; }
-        public bool FailCreate { get; init; }
+        public bool FailPause { get; init; }
         public Action? AfterClaim { get; set; }
-        public ValueTask CreateAsync(RunState state, CancellationToken token) => FailCreate
-            ? throw new InvalidOperationException("Store unavailable.") : _inner.CreateAsync(state, token);
+        public ValueTask AppendEventAsync(ExecutionEvent e, CancellationToken token) => _inner.AppendEventAsync(e, token);
+        public ValueTask<IReadOnlyList<ExecutionEvent>> ReadEventsAfterAsync(Guid id, long after, int limit, CancellationToken token) => _inner.ReadEventsAfterAsync(id, after, limit, token);
+        public ValueTask CreateAsync(RunState state, IReadOnlyList<ExecutionEvent> events, CancellationToken token) =>
+            _inner.CreateAsync(state, events, token);
         public async ValueTask<RunState?> GetAsync(Guid id, CancellationToken token)
         {
             var state = await _inner.GetAsync(id, token);
@@ -445,9 +447,10 @@ public sealed class ApprovalTests
             }
             return state;
         }
-        public async ValueTask<bool> TryReplaceAsync(Guid id, long version, RunState state, CancellationToken token)
+        public async ValueTask<bool> TryReplaceAsync(Guid id, long version, RunState state, IReadOnlyList<ExecutionEvent> events, CancellationToken token)
         {
-            var won = await _inner.TryReplaceAsync(id, version, state, token);
+            if (FailPause && state.Lifecycle == RunLifecycleState.AwaitingApproval) throw new InvalidOperationException("Store unavailable.");
+            var won = await _inner.TryReplaceAsync(id, version, state, events, token);
             if (won && state.Lifecycle == RunLifecycleState.Running) AfterClaim?.Invoke();
             return won;
         }

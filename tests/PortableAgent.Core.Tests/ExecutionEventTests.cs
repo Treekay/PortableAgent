@@ -28,7 +28,7 @@ public sealed class ExecutionEventTests
         {
             Execute = call => new(call.CallId, true, JsonSerializer.SerializeToElement(new { secret = "output-secret" }))
         };
-        var runner = new AgentRunner(model, new TestToolProvider(), executor, new(), sink);
+        var runner = new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new(), sink);
         var before = DateTimeOffset.UtcNow;
         var result = await runner.RunAsync(new("private-user-message"));
         var after = DateTimeOffset.UtcNow;
@@ -106,7 +106,7 @@ public sealed class ExecutionEventTests
             }
         };
         var tools = new TestToolProvider();
-        var runner = new AgentRunner(model, tools, executor, new(4, scenario == "limit" ? 0 : 4), sink);
+        var runner = new AgentRunner("test-runtime-v1", model, tools, executor, new(4, scenario == "limit" ? 0 : 4), sink);
         var result = await runner.RunAsync(new("input"), new CancellationToken(scenario == "cancelled"));
         var events = sink.Events.ToArray();
 
@@ -139,12 +139,12 @@ public sealed class ExecutionEventTests
     {
         var baselineModel = SuccessfulModel();
         var baselineExecutor = new RecordingExecutor();
-        var baseline = await new AgentRunner(baselineModel, new TestToolProvider(), baselineExecutor, new())
+        var baseline = await new AgentRunner("test-runtime-v1", baselineModel, new TestToolProvider(), baselineExecutor, new())
             .RunAsync(new("input"));
         var sink = new ThrowingSink(cancelException);
         var model = SuccessfulModel();
         var executor = new RecordingExecutor();
-        var observed = await new AgentRunner(model, new TestToolProvider(), executor, new(), sink)
+        var observed = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new(), sink)
             .RunAsync(new("input"));
 
         Assert.Equal(baseline.Status, observed.Status);
@@ -159,7 +159,7 @@ public sealed class ExecutionEventTests
     public async Task Concurrent_runs_on_same_runner_have_independent_ids_and_sequences()
     {
         var sink = new RecordingSink();
-        var runner = new AgentRunner(new FinalModel(), new TestToolProvider(), new RecordingExecutor(), new(), sink);
+        var runner = new AgentRunner("test-runtime-v1", new FinalModel(), new TestToolProvider(), new RecordingExecutor(), new(), sink);
         var runs = await Task.WhenAll(runner.RunAsync(new("first")), runner.RunAsync(new("second")));
         Assert.NotEqual(runs[0].RunId, runs[1].RunId);
         foreach (var run in runs)
@@ -180,7 +180,7 @@ public sealed class ExecutionEventTests
         using var source = new CancellationTokenSource();
         if (preCancelled) source.Cancel();
         var sink = new TokenRecordingSink();
-        var runner = new AgentRunner(new FinalModel(), new TestToolProvider(), new RecordingExecutor(), new(), sink);
+        var runner = new AgentRunner("test-runtime-v1", new FinalModel(), new TestToolProvider(), new RecordingExecutor(), new(), sink);
 
         var result = await runner.RunAsync(new("input"), source.Token);
 
@@ -203,7 +203,7 @@ public sealed class ExecutionEventTests
             return new ModelReply("Not a final Run result after cancellation.", [], ModelFinishReason.Completed);
         });
         var sink = new TokenRecordingSink();
-        var result = await new AgentRunner(model, new TestToolProvider(), new RecordingExecutor(), new(), sink)
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), new RecordingExecutor(), new(), sink)
             .RunAsync(new("input"), source.Token);
 
         Assert.Equal(RunStatus.Cancelled, result.Status);
@@ -216,7 +216,7 @@ public sealed class ExecutionEventTests
     public async Task Failed_delivery_is_not_retried_and_its_sequence_is_not_reused()
     {
         var sink = new FailOnceSink();
-        var result = await new AgentRunner(new FinalModel(), new TestToolProvider(), new RecordingExecutor(), new(), sink)
+        var result = await new AgentRunner("test-runtime-v1", new FinalModel(), new TestToolProvider(), new RecordingExecutor(), new(), sink)
             .RunAsync(new("input"));
 
         Assert.Equal(RunStatus.Completed, result.Status);
@@ -231,7 +231,7 @@ public sealed class ExecutionEventTests
             [Call(), Call("another-tool") with { CallId = "call-2" }], ModelFinishReason.Completed));
         var sink = new RecordingSink();
         var executor = new RecordingExecutor();
-        var result = await new AgentRunner(model, new TestToolProvider(), executor, new(), sink).RunAsync(new("input"));
+        var result = await new AgentRunner("test-runtime-v1", model, new TestToolProvider(), executor, new(), sink).RunAsync(new("input"));
 
         Assert.Equal(RunStatus.Failed, result.Status);
         Assert.Equal(new[] { "call-1", "call-2" }, sink.Events

@@ -9,8 +9,8 @@ public enum RunLifecycleState { Running, AwaitingApproval, Completed, Failed, Ca
 public sealed class RunState
 {
     public Guid RunId { get; init; }
-    // Phase 4A scopes resume to the same trusted Runner composition. Not a user identity.
-    public Guid RuntimeId { get; init; }
+    // Stable trusted composition identity, independent of process or user identity.
+    public required string RuntimeDefinitionId { get; init; }
     public RunLifecycleState Lifecycle { get; set; } = RunLifecycleState.Running;
     public long Version { get; set; }
     public List<AgentMessage> Conversation { get; set; } = [];
@@ -25,7 +25,7 @@ public sealed class RunState
 
     public RunState Snapshot() => new()
     {
-        RunId = RunId, RuntimeId = RuntimeId, Lifecycle = Lifecycle, Version = Version,
+        RunId = RunId, RuntimeDefinitionId = RuntimeDefinitionId, Lifecycle = Lifecycle, Version = Version,
         Conversation = Conversation.Select(message => message.Role switch
         {
             MessageRole.User => AgentMessage.User(message.Text!),
