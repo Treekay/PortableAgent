@@ -1,5 +1,138 @@
 # PortableAgent
 
+[English](#english) | [中文](#中文)
+
+## English
+
+A portable C#/.NET agent runtime with MCP tools, durable human approval, and a React Developer Studio for inspecting execution.
+
+PortableAgent separates the execution loop from business integrations. Applications supply tools, policies, and trusted configuration; the runtime coordinates model turns, validates tool calls, evaluates policy, and handles approval and execution. Pet boarding and flight booking demonstrate the same runtime working across two domains and independent MCP servers.
+
+The planned Runtime + API + Studio MVP is complete through **Phase 7B**. Current demos use deterministic scripted model providers and require **no API key**. A real LLM provider is not implemented yet.
+
+### Capabilities and architecture
+
+- Domain-neutral model, tool discovery, and tool execution interfaces, with trusted tool identities and validated call/result associations.
+- `Allow`, `Deny`, and `RequireApproval` policies. Approved calls retain their frozen arguments and are revalidated before execution.
+- SQLite snapshots and execution events, atomic lifecycle checkpoints, and optimistic concurrency for approval submission.
+- Durable approval recovery: pause, exit the process, then approve or reject in another process to resume the same Run.
+- MCP tools over Streamable HTTP, demonstrated by separate Pet Boarding and Flight Booking sample servers.
+- ASP.NET Core command/query API and SSE event replay with live updates. Disconnecting a browser does not cancel a Run.
+- React Studio with Chat, Trace, Graph, and Tools. Navigation preserves the active connection, draft, approval, and Chat expansion state.
+
+```text
+React Studio → HTTP / SSE → ASP.NET Core API → Agent Runtime
+                                                ├─ Model provider (scripted demos)
+                                                ├─ Policy and approval
+                                                ├─ SQLite state and events
+                                                └─ MCP adapter → Business tool server
+```
+
+Core remains independent of HTTP, MCP, SQLite, and business domains. The API hosts the runtime; there is no additional runtime service to launch alongside it. The Console provides a separate way to exercise the runtime directly.
+
+### Run Studio locally
+
+Prerequisites: **.NET 10 SDK** and **Node.js** (verified with Node 22.22.1 / npm 10.9.4).
+
+```sh
+git clone https://github.com/Treekay/PortableAgent.git
+cd PortableAgent
+dotnet build PortableAgent.sln
+```
+
+Open four terminals at the repository root and run each service separately:
+
+```sh
+# Terminal 1 — Pet Boarding MCP, port 5102
+dotnet run --project samples/PortableAgent.Sample.PetBoardingMcpServer
+```
+
+```sh
+# Terminal 2 — Flight Booking MCP, port 5103
+dotnet run --project samples/PortableAgent.Sample.FlightBookingMcpServer
+```
+
+```sh
+# Terminal 3 — API hosting the runtime, port 5100
+dotnet run --project src/PortableAgent.Api
+```
+
+```sh
+# Terminal 4 — Studio, port 5173
+cd src/PortableAgent.Studio
+npm install
+npm run dev
+```
+
+Open [Studio](http://localhost:5173). Vite proxies `/api` requests and SSE to port 5100. The API automatically initializes SQLite and logs its database path; no separate database service or manual migration command is needed for this path. Keep all four processes running; use Ctrl+C to stop them.
+
+Select an Agent and use these exact demo inputs:
+
+| Agent | Message | Expected result |
+| --- | --- | --- |
+| Pet Boarding | `Has Cooper eaten today?` | Reads care records and returns an answer |
+| Pet Boarding | `Ask the staff to give Cooper some fresh water.` | Policy denies the operation; no tool execution |
+| Flight Booking | `Cancel my booking.` | Pauses for human approval before cancelling booking NZ123 |
+
+For Flight, inspect Trace, Graph, and Tools while approval is pending, then return to Chat and approve. The successful path has **20 events, 10 graph nodes, and one logical tool proposal**, ending with `Booking NZ123 has been cancelled.` Choose the intended Run in the shared inspector selector; it does not automatically switch to the newest Run.
+
+The sample servers keep business state in memory. Restart the Flight MCP server to reset its booking for another cancellation demo. They do not connect to real airlines or pet boarding systems.
+
+### Inspect execution
+
+| View | What it shows |
+| --- | --- |
+| Chat | Independent tasks, execution progress, frozen approval arguments, and persisted final answers |
+| Trace | One received event per row, exact Sequence ordering, six category filters, and expandable raw event details |
+| Graph | A read-only projection of observed execution, with stable nodes, pan/zoom, and a text inspector |
+| Tools | The persisted Run tool catalog, read-only schemas, and separately labelled observed usage and policy history |
+
+Graph solid edges represent observed relationships; dashed edges represent observation order, **not data dependencies**. Proposal and resumed execution nodes may describe different stages of the same logical call. The graph does not expose hidden reasoning or define an editable workflow.
+
+`GET /api/runs/{runId}/tools` reads the persisted snapshot only; it does not perform MCP discovery. A Running snapshot may be empty or reflect an earlier checkpoint. Current schemas are not historical schema versions. Tools has no manual invocation or parameter editor.
+
+### Test and troubleshoot
+
+```sh
+# From the repository root
+dotnet test PortableAgent.sln
+
+# Frontend checks
+cd src/PortableAgent.Studio
+npm run build
+npm test
+
+# Stop the four manually started services before browser tests
+npx playwright install chromium
+npm run test:e2e
+```
+
+Playwright starts the real MCP servers, API, and Studio with an isolated test database. The verified baseline is **276 backend tests, 94 frontend tests, and 2 browser scenarios**. See the [Phase 7B verification record](docs/phase7b-verification.md) for detailed evidence (Chinese).
+
+If Windows NuGet restore reports access denied inside the global package cache, an isolated cache can bypass the inaccessible directory. In **Git Bash**, set this before running `dotnet`:
+
+```bash
+export NUGET_PACKAGES="$LOCALAPPDATA/PortableAgent/NuGetPackages"
+dotnet build PortableAgent.sln
+```
+
+In **PowerShell**, use:
+
+```powershell
+$env:NUGET_PACKAGES = Join-Path $env:LOCALAPPDATA 'PortableAgent\NuGetPackages'
+dotnet build PortableAgent.sln
+```
+
+These settings apply to the current terminal and its child processes. Repeat the setting in each new .NET terminal. This bypasses the original cache; it does not repair its permissions or require deleting it.
+
+### Current boundaries
+
+Each message starts an independent Run; there is no conversational Session. Refreshing Studio clears its in-memory history, and the UI does not restore it from the backend. Only a successfully persisted AwaitingApproval checkpoint supports explicit approval recovery; Running executions do not automatically recover after a crash.
+
+There is no authentication, production deployment setup, real LLM integration, token streaming, or guarantee of exactly-once external side effects. This MVP demonstrates portable execution, durable approval, MCP integration, and inspection. It is also a learning project for C# and AI application engineering.
+
+## 中文
+
 使用 C# / .NET 构建的可迁移、业务无关的 Agent Runtime 与适配框架。
 
 业务应用提供工具、策略和可信配置，同一个 Runtime 负责模型循环、校验、工具调度及审批恢复。本项目也用于逐步学习 C#、异步编程、接口设计、测试和 AI 应用开发。
