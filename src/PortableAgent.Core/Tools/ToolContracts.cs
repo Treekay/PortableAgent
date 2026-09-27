@@ -9,8 +9,11 @@ public sealed record ToolDefinition(
 
 public sealed record ToolCall(string CallId, string ToolName, JsonElement Arguments);
 
+public enum ToolResultDisposition { Executed, DeniedByPolicy, RejectedByUser, NotExecutedDueToBatchPolicy }
+
 public sealed record ToolResult(
-    string CallId, bool IsSuccess, JsonElement? Output = null, string? Error = null);
+    string CallId, bool IsSuccess, JsonElement? Output = null, string? Error = null,
+    ToolResultDisposition Disposition = ToolResultDisposition.Executed);
 
 public interface IToolProvider
 {

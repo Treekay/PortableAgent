@@ -38,8 +38,17 @@ public sealed class FlightBookingScriptedModelProvider : IModelProvider
             || request.Messages[1].ToolCalls[0].ToolName != toolName
             || !JsonElement.DeepEquals(request.Messages[1].ToolCalls[0].Arguments, arguments)
             || request.Messages[2].Role != MessageRole.Tool
-            || request.Messages[2].ToolResult is not { CallId: "call-1", IsSuccess: true, Output: { } output })
+            || request.Messages[2].ToolResult is not { CallId: "call-1" } toolResult)
             throw new InvalidOperationException("Conversation does not match the FlightBooking script.");
+
+        if (!toolResult.IsSuccess && toolResult.Disposition is ToolResultDisposition.RejectedByUser
+            or ToolResultDisposition.DeniedByPolicy or ToolResultDisposition.NotExecutedDueToBatchPolicy)
+            return Task.FromResult(new ModelReply(isRead ? "The booking was not retrieved."
+                : toolResult.Disposition == ToolResultDisposition.RejectedByUser
+                    ? "Understood. I did not cancel the booking."
+                    : "The booking was not cancelled because the operation was not permitted.", [], ModelFinishReason.Completed));
+        if (!toolResult.IsSuccess || toolResult.Disposition != ToolResultDisposition.Executed || toolResult.Output is not { } output)
+            throw new InvalidOperationException("Expected an executed FlightBooking result.");
 
         // Validate business fields before returning any success confirmation.
         var valid = isRead

@@ -8,11 +8,11 @@
 
 ## 当前状态
 
-**Phase 0 架构基线、Phase 1 最小执行循环、Phase 2 本地领域可迁移性验证、Phase 3 结构化执行事件已完成。**
+**Phase 0–3 及 Phase 4A（策略、内存审批与恢复）已完成。Phase 4B SQLite 尚未开始。**
 
 当前没有接入真实大模型。模型实现都是固定脚本，仅识别约定的演示输入；无需 API Key，也不会调用模型服务。宠物寄养与航班预订通过不同的模型和工具组合，共用同一个 `AgentRunner` 和 Core 程序集。Phase 2 没有修改 Core；Phase 3 在 Core 中加入了业务无关的执行事件观察能力。
 
-这仍是本地模拟验证，不是完整 Agent 平台。MCP、策略、审批、持久化、技术遥测、API 和 Studio 均未实现。
+这仍是本地模拟验证，不是完整 Agent 平台。数据库持久化、重启恢复、MCP、技术遥测、API 和 Studio 均未实现。
 
 演示流程：
 
@@ -37,7 +37,8 @@ FlightBookingScriptedModelProvider + FlightBookingToolProvider + FlightBookingTo
 - 通过 Runner 构造函数传入的可信 `RunLimits`，默认最多 4 次模型调用和 4 次工具调用。
 - JSON 生命周期处理，以及围绕执行循环的 14 个自动化测试用例。
 - 两个领域各自的查询与模拟操作，以及 9 个集成测试用例。
-- 结构化执行事件、可选异步 sink、Console Trace，以及 16 个新增事件测试用例（合计 39 个）。
+- 结构化执行事件、可选异步 sink、Console Trace，以及 16 个事件测试用例。
+- Allow / Deny / RequireApproval、内存暂停与审批恢复，以及 31 个 Phase 4A 测试用例（共 70 个）。
 
 | 领域 | 模型可见工具 | 可信内部 ToolId |
 | --- | --- | --- |
@@ -48,7 +49,7 @@ FlightBookingScriptedModelProvider + FlightBookingToolProvider + FlightBookingTo
 
 员工任务创建和取消预订都返回固定模拟结果，没有外部调用或持久化；取消后的再次查询仍返回固定的 confirmed 预订。`my booking` 固定指向 NZ123，不代表已实现用户身份或授权。
 
-本单元中，工具失败会直接终止运行，不自动重试。取消采用标准 `CancellationToken` 协作机制；尚无超时框架。
+实际工具执行失败会终止运行，不自动重试；策略拒绝和用户拒绝是未执行的结果，会反馈给模型。取消采用标准 `CancellationToken` 协作机制；尚无超时框架。
 
 ## 快速开始
 
@@ -63,26 +64,40 @@ dotnet test PortableAgent.sln
 dotnet run --project src/PortableAgent.Console
 ```
 
-Console 顺序展示两个领域的 Trace，以下为航班部分的实际输出：
+Console 演示航班取消的暂停与模拟批准，输出如下（ID 每次不同）：
 
 ```text
-=== Flight Booking ===
-Show my booking.
+=== Flight Booking Approval ===
+Cancel my booking.
 [1] Run started
 [2] Discovering tools
 [3] Discovered 2 tools
 [4] Model turn 1 started
 [5] Model turn 1 completed · ToolCalls
-[6] Tool proposed · get_booking
-[7] Tool execution started · get_booking
-[8] Tool execution completed · get_booking · success=True
-[9] Model turn 2 started
-[10] Model turn 2 completed · Completed
-[11] Run completed · 2 model turns · 1 tool call(s)
-Booking NZ123 is confirmed from Auckland to Sydney on 2026-10-10.
+[6] Tool proposed · cancel_booking
+[7] Evaluating policy
+[8] Policy evaluated · RequireApproval
+[9] Approval required · <approval-id>
+Status: AwaitingApproval
+RunId: <run-id>
+Simulating approval...
+[10] Approval resolved · Approved
+[11] Run resumed
+[12] Discovering tools
+[13] Discovered 2 tools
+[14] Evaluating policy
+[15] Policy evaluated · RequireApproval
+[16] Tool execution started · cancel_booking
+[17] Tool execution completed · cancel_booking · success=True
+[18] Model turn 2 started
+[19] Model turn 2 completed · Completed
+[20] Run completed · 2 model turns · 1 tool call(s)
+Approval command: Accepted
+RunId: <same-run-id>
+Booking NZ123 has been cancelled.
 ```
 
-Console 顺序执行两次独立组合的查询演示，没有菜单或交互式聊天。两个模拟操作场景由集成测试覆盖。Phase 1 的加法脚本、Provider 和 Executor 原样保留，但不再是默认 Console 演示。
+Console 没有菜单或交互式聊天；批准是明确标注的本地模拟。Phase 1 加法示例和 Phase 2 两个领域保留，查询、批准、拒绝路径由测试覆盖。领域执行器不感知审批；脚本仅增加解释未执行结果的分支。
 
 ## 项目结构与依赖
 
@@ -93,8 +108,11 @@ src/
     Execution/          执行循环、请求、结果及运行限制
       Events/           事件契约、枚举、sink 接口与安全包装
     Models/             中立模型契约和结构化消息
+    Policies/           策略契约与默认 AllowAll 实现
     Tools/              工具身份、定义、调用、结果及接口
   PortableAgent.Infrastructure/
+    Execution/          InMemoryRunStateStore
+    Policies/           按可信 ToolId 配置的内存策略
     Models/             加法、PetBoarding、FlightBooking 脚本
     Tools/              原有加法工具
       PetBoarding/      宠物工具目录与执行器
@@ -109,6 +127,7 @@ tests/
     TestDoubles/        记录模型请求和工具调用的测试替身
   PortableAgent.IntegrationTests/
     DomainPortabilityTests.cs
+    ApprovalTests.cs
     RecordingWrappers.cs
 ```
 
@@ -126,7 +145,7 @@ Core 不依赖模型 SDK、MCP、EF Core、ASP.NET Core 或业务领域类型。
 
 模型提出操作，Runtime 校验并调度工具；业务系统仍应负责最终的业务合法性和权限检查。
 
-当前 Runtime 的校验仅包括注册工具查找、调用关联、回复结构及执行预算，**尚未实现策略引擎或业务授权**。
+Runtime 校验注册工具、调用关联、回复结构、执行预算，并在执行前评估策略。**Runtime 的人工批准不替代业务系统的身份认证、资源权限与业务合法性校验。**
 
 工具内部身份由 `SourceId` 和 `Name` 组成。例如：
 
@@ -139,17 +158,54 @@ ModelName: calculator_add
 
 工具目录提供输入 Schema，但当前没有通用 JSON Schema 校验器。加法执行器自行验证 `a`、`b`，使用 `decimal` 运算并处理溢出。
 
+## Phase 4A：暂停与恢复
+
+公开 `RunStatus` 包含 Completed、Failed、Cancelled、LimitReached、AwaitingApproval；Running 只存在于 `RunLifecycleState`。AwaitingApproval 不是终止结果，不发布终止事件，也不留下等待审批的 Task。
+
+`AgentRunner` 可注入 `IPolicyEvaluator` 和 `IRunStateStore`。不配置策略时使用 AllowAll，保持旧演示行为；显式 `InMemoryPolicyEvaluator` 按 ToolId 匹配，未配置工具默认 Deny。RequireApproval 需要提供 Store，否则明确 Failed。
+
+Console 的配置为：booking.get、care.get_records 允许，booking.cancel 要求确认，staff.create_task 拒绝。配置在组合入口，预算限制仍由 Runtime 负责。
+
+`ToolResult.Disposition` 默认 Executed，表示执行器实际被调用（结果可能成功或失败）。DeniedByPolicy、RejectedByUser、NotExecutedDueToBatchPolicy 表示未调用执行器，不产生工具执行事件，但会作为关联 Tool 消息交回模型。
+
+每个模型批次先检查全部工具与预算、评估全部政策，再执行：
+
+| 批次政策 | 行为 |
+| --- | --- |
+| 全部 Allow | 顺序执行 |
+| 存在 Deny | 整批零执行，每项获得拒绝或批次阻止结果，模型继续 |
+| 无 Deny，多调用且存在 RequireApproval | 明确 Failed：Phase 4A 不支持多调用审批，零执行 |
+| 单调用 RequireApproval | 冻结状态、保存、返回 AwaitingApproval |
+
+这不是事务系统；全部获准后的第二个工具失败，不会回滚第一个工具。
+
+`PendingApproval` 冻结 ApprovalId、RunId、ToolDefinition、精确 ToolCall、PolicyId、PolicyReason、创建时间及 Pending/Approved/Rejected 状态。模型不会在批准后重新生成执行参数。JSON 和集合在保存、读取及返回审批视图时取得独立副本。
+
+`RunState` 保存生命周期、Version、对话、工具目录、待审批与已解决审批、模型/工具计数、原 RunLimits、UsedCallIds 和 LastSequence；不保存 Task、委托、执行器、模型、sink 或旧 CancellationToken。暂停时 Assistant 工具请求已经在对话里。
+
+Store 只有 CreateAsync、GetAsync、TryReplaceAsync。内存实现用短锁进行版本比较和快照替换，锁内不等待外部组件。暂停顺序是：冻结 → 分配 ApprovalRequired 序号 → 成功保存快照 → 尽力投递事件 → 返回。保存失败返回 Failed；观察者失败不会撤销成功保存的暂停。
+
+`SubmitApprovalAsync(ApprovalCommand)` 接受 RunId、ApprovalId 和 Approve/Reject，不接受新参数。它将 AwaitingApproval 原子替换为 Running，并保存已解决审批；仅版本比较成功者恢复执行。重复或冲突提交返回 Conflict，未知 RunId 返回 NotFound，错误 ApprovalId 返回 Conflict，不将原 Run 标记为失败。
+
+批准后重新发现工具，比较 ToolId、ModelName 和 InputSchema（JSON 结构比较）；不兼容则失败关闭。当前策略为 Allow 就执行，为 Deny 就反馈拒绝，为 RequireApproval 则检查政策身份。非空 PolicyId 使用区分大小写的精确匹配；双方 PolicyId 都为 null 时，还要求 PolicyReason 精确一致（包括双方都为 null）。身份不同则以新 ApprovalId 再次暂停，原批准不能满足新要求。命名政策的实质变化必须分配新 ID；本阶段没有完整版本或语义检测。
+
+拒绝后不调用执行器，追加 RejectedByUser，继续模型。恢复沿用 RunId、序号、CallId 历史和预算；原提案不再次计数。新执行调用使用新的取消令牌：CAS 成功前取消不消费审批，成功后取消不将审批重置 Pending，也不自动重试。
+
+Phase 4A 用 RuntimeId 将暂停记录绑定到原 Runner 组合，必须通过同一 Runner 实例提交审批，避免把暂停操作交给另一套模型/执行器。它不是认证机制。SQLite 阶段需要设计可跨进程重建的可信配置绑定及状态序列化。内存记录暂不自动清理，进程退出即丢失；没有任意执行中崩溃恢复、事件持久化、自动补偿或跨进程幂等保证。
+
 ## 执行事件
 
 事件是执行事实的观察通道，不决定模型或工具的下一步，也不是恢复执行所需的状态。本项目没有采用事件溯源。
 
-`ExecutionEvent` 只有 `EventId`、`RunId`、`Sequence`、UTC `OccurredAt`、`EventType` 和 JSON `Payload`。Runner 每次运行生成新的 RunId，序号从 1 开始；并发 Run 的身份、序号和预算计数独立。结果通过 `AgentRunResult.RunId` 与事件关联，请求仍只包含用户消息。
+`ExecutionEvent` 只有 `EventId`、`RunId`、`Sequence`、UTC `OccurredAt`、`EventType` 和 JSON `Payload`。新 Run 生成新的 RunId，序号从 1 开始；恢复则延续已保存的身份与序号，不再次发送 RunStarted。并发 Run 的状态独立。结果通过 `AgentRunResult.RunId` 与事件关联，请求仍只包含用户消息。
 
 开始事件紧接着对应操作的调用，完成事件仅在组件正常返回后产生。`ToolExecutionCompleted(success=false)` 表示执行器返回失败结果；执行器抛异常时不产生该完成事件。模型返回的每个工具提案在 Runtime 验证前产生 `ToolCallProposed`，因此未知工具会有提案，但不会有工具执行开始事件。终止事件携带实际模型调用数和工具调用数。
 
 `IExecutionEventSink` 是可选构造依赖，默认空实现。每个 Run 使用一个安全包装器隔离消费者异常：失败不重试、不回退序号，也不改变 Agent 结果。包装器仅保留内部故障计数供调试，不向 `AgentRunResult` 加入观察者健康字段。消费者自己的取消异常只有在 Run 令牌实际取消时才归为 Run 取消，否则按消费者故障处理。
 
 普通事件使用 Run 的取消令牌；四种终止事件使用 `CancellationToken.None` 尽力投递。预先取消的请求仍获得 RunId、返回 Cancelled 并尝试发送 RunCancelled，但普通事件可能未被观察到。投递失败可能造成序号间隙，当前没有持久化、重放或可靠交付保证。
+
+Phase 4A 增加 PolicyEvaluationStarted、PolicyEvaluationCompleted、ApprovalRequired、ApprovalResolved、RunResumed。成功取得审批恢复权后的 ApprovalResolved / RunResumed 使用 None 投递已发生的状态转换，即使恢复调用随后被取消；输掉 CAS 的命令不发布这些事件。失败的投递序号仍保留在状态中。
 
 当前顺序等待进程内 sink，**慢 sink 会增加运行延迟，不返回的 sink 也会阻塞调用**。共享 sink 需要自行保证并发安全；本阶段不引入后台队列或网络传输。
 
@@ -167,6 +223,8 @@ Core 测试只引用 Core，使用记录型替身验证控制流；集成测试�
 
 事件测试验证语义顺序、关联和序号、四种终止状态、投递故障隔离、sink 自发取消、Run 取消令牌传播、并发 Run、失败投递不重试以及 Payload 范围。原 Phase 1/2 测试不依赖事件展示文本。
 
+Phase 4A 测试验证 Allow/Deny、暂停保存先于观察、精确调用恢复、用户拒绝、错误及重复审批、并发 CAS、预算与 CallId 延续、工具兼容性、政策重新评估与身份变化、批次语义、Store 故障、快照所有权、观察者故障和审批前后取消。既有事件测试仅机械增加政策事件对应的顺序/计数。
+
 建议按以下顺序阅读：
 
 1. [Console 入口](src/PortableAgent.Console/Program.cs)：查看组件如何组合。
@@ -180,13 +238,15 @@ Phase 2 建议继续阅读 [领域迁移测试](tests/PortableAgent.IntegrationT
 
 Phase 3 建议阅读 [事件契约](src/PortableAgent.Core/Execution/Events/ExecutionEvent.cs)、[安全 sink](src/PortableAgent.Core/Execution/Events/SafeExecutionEventSink.cs)、[事件测试](tests/PortableAgent.Core.Tests/ExecutionEventTests.cs) 和 [Console renderer](src/PortableAgent.Console/ConsoleExecutionEventSink.cs)。
 
+Phase 4A 建议先看 [审批测试](tests/PortableAgent.IntegrationTests/ApprovalTests.cs)，再看 [RunState](src/PortableAgent.Core/Execution/RunState.cs)、[内存 Store](src/PortableAgent.Infrastructure/Execution/InMemoryRunStateStore.cs) 和 Runner 中的 SubmitApprovalAsync、PauseAsync、ResumeAsync。
+
 ## 后续方向
 
 以下是分阶段计划，不代表当前已经支持：
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 4 | 策略、审批，以及已持久化待审批 Run 的重启恢复 |
+| Phase 4B | SQLite 保存状态、审批及必要事件，仅保证已成功保存的待审批 Run 重启恢复 |
 | Phase 5 | MCP 适配器与协议迁移验证 |
 | Phase 6 | ASP.NET Core API、HTTP 命令与 SSE 订阅 |
 | Phase 7 | Developer Studio：Chat 与内联执行进度 |

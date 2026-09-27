@@ -44,6 +44,8 @@ public sealed class ExecutionEventTests
             ExecutionEventType.ModelTurnStarted,
             ExecutionEventType.ModelTurnCompleted,
             ExecutionEventType.ToolCallProposed,
+            ExecutionEventType.PolicyEvaluationStarted,
+            ExecutionEventType.PolicyEvaluationCompleted,
             ExecutionEventType.ToolExecutionStarted,
             ExecutionEventType.ToolExecutionCompleted,
             ExecutionEventType.ModelTurnStarted,
@@ -65,12 +67,12 @@ public sealed class ExecutionEventTests
         Assert.Equal("ToolCalls", events[4].Payload.GetProperty("finishReason").GetString());
         Assert.Equal(1, events[4].Payload.GetProperty("toolCallCount").GetInt32());
         Assert.Equal("call-1", events[5].Payload.GetProperty("callId").GetString());
-        Assert.Equal("trusted-local/calculator.add", events[6].Payload.GetProperty("toolId").GetString());
-        Assert.True(events[7].Payload.GetProperty("success").GetBoolean());
-        Assert.Equal(2, events[8].Payload.GetProperty("turn").GetInt32());
-        Assert.Equal("Completed", events[10].Payload.GetProperty("status").GetString());
-        Assert.Equal(2, events[10].Payload.GetProperty("modelTurns").GetInt32());
-        Assert.Equal(1, events[10].Payload.GetProperty("toolCalls").GetInt32());
+        Assert.Equal("trusted-local/calculator.add", events[8].Payload.GetProperty("toolId").GetString());
+        Assert.True(events[9].Payload.GetProperty("success").GetBoolean());
+        Assert.Equal(2, events[10].Payload.GetProperty("turn").GetInt32());
+        Assert.Equal("Completed", events[12].Payload.GetProperty("status").GetString());
+        Assert.Equal(2, events[12].Payload.GetProperty("modelTurns").GetInt32());
+        Assert.Equal(1, events[12].Payload.GetProperty("toolCalls").GetInt32());
         var json = string.Join("\n", events.Select(e => e.Payload.GetRawText()));
         foreach (var secret in new[] { "argument-secret", "output-secret", "private-model-text", "private-final-answer", "private-user-message" })
             Assert.DoesNotContain(secret, json);
@@ -150,7 +152,7 @@ public sealed class ExecutionEventTests
         Assert.Equal(baseline.Error, observed.Error);
         Assert.Equal(baselineModel.Requests.Count, model.Requests.Count);
         Assert.Equal(baselineExecutor.Calls.Count, executor.Calls.Count);
-        Assert.Equal(11, sink.Attempts);
+        Assert.Equal(13, sink.Attempts);
     }
 
     [Fact]
