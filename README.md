@@ -8,11 +8,11 @@
 
 ## 当前状态
 
-**Phase 0 架构基线、Phase 1 最小执行循环、Phase 2 本地领域可迁移性验证已完成。**
+**Phase 0 架构基线、Phase 1 最小执行循环、Phase 2 本地领域可迁移性验证、Phase 3 结构化执行事件已完成。**
 
-当前没有接入真实大模型。模型实现都是固定脚本，仅识别约定的演示输入；无需 API Key，也不会调用模型服务。宠物寄养与航班预订通过不同的模型和工具组合，共用同一个 `AgentRunner` 和 Core 程序集。本阶段没有修改 Core。
+当前没有接入真实大模型。模型实现都是固定脚本，仅识别约定的演示输入；无需 API Key，也不会调用模型服务。宠物寄养与航班预订通过不同的模型和工具组合，共用同一个 `AgentRunner` 和 Core 程序集。Phase 2 没有修改 Core；Phase 3 在 Core 中加入了业务无关的执行事件观察能力。
 
-这仍是本地模拟验证，不是完整 Agent 平台。MCP、策略、审批、持久化、执行事件、API 和 Studio 均未实现。
+这仍是本地模拟验证，不是完整 Agent 平台。MCP、策略、审批、持久化、技术遥测、API 和 Studio 均未实现。
 
 演示流程：
 
@@ -37,6 +37,7 @@ FlightBookingScriptedModelProvider + FlightBookingToolProvider + FlightBookingTo
 - 通过 Runner 构造函数传入的可信 `RunLimits`，默认最多 4 次模型调用和 4 次工具调用。
 - JSON 生命周期处理，以及围绕执行循环的 14 个自动化测试用例。
 - 两个领域各自的查询与模拟操作，以及 9 个集成测试用例。
+- 结构化执行事件、可选异步 sink、Console Trace，以及 16 个新增事件测试用例（合计 39 个）。
 
 | 领域 | 模型可见工具 | 可信内部 ToolId |
 | --- | --- | --- |
@@ -62,15 +63,22 @@ dotnet test PortableAgent.sln
 dotnet run --project src/PortableAgent.Console
 ```
 
-Console 预期输出：
+Console 顺序展示两个领域的 Trace，以下为航班部分的实际输出：
 
 ```text
-=== Pet Boarding ===
-Has Cooper eaten today?
-Yes. Cooper was fed at 08:00.
-
 === Flight Booking ===
 Show my booking.
+[1] Run started
+[2] Discovering tools
+[3] Discovered 2 tools
+[4] Model turn 1 started
+[5] Model turn 1 completed · ToolCalls
+[6] Tool proposed · get_booking
+[7] Tool execution started · get_booking
+[8] Tool execution completed · get_booking · success=True
+[9] Model turn 2 started
+[10] Model turn 2 completed · Completed
+[11] Run completed · 2 model turns · 1 tool call(s)
 Booking NZ123 is confirmed from Auckland to Sydney on 2026-10-10.
 ```
 
@@ -83,6 +91,7 @@ PortableAgent.sln
 src/
   PortableAgent.Core/
     Execution/          执行循环、请求、结果及运行限制
+      Events/           事件契约、枚举、sink 接口与安全包装
     Models/             中立模型契约和结构化消息
     Tools/              工具身份、定义、调用、结果及接口
   PortableAgent.Infrastructure/
@@ -92,9 +101,11 @@ src/
       FlightBooking/    航班工具目录与执行器
   PortableAgent.Console/
     Program.cs          直接通过构造函数组合依赖并运行演示
+    ConsoleExecutionEventSink.cs
 tests/
   PortableAgent.Core.Tests/
     AgentRunnerTests.cs
+    ExecutionEventTests.cs
     TestDoubles/        记录模型请求和工具调用的测试替身
   PortableAgent.IntegrationTests/
     DomainPortabilityTests.cs
@@ -128,6 +139,24 @@ ModelName: calculator_add
 
 工具目录提供输入 Schema，但当前没有通用 JSON Schema 校验器。加法执行器自行验证 `a`、`b`，使用 `decimal` 运算并处理溢出。
 
+## 执行事件
+
+事件是执行事实的观察通道，不决定模型或工具的下一步，也不是恢复执行所需的状态。本项目没有采用事件溯源。
+
+`ExecutionEvent` 只有 `EventId`、`RunId`、`Sequence`、UTC `OccurredAt`、`EventType` 和 JSON `Payload`。Runner 每次运行生成新的 RunId，序号从 1 开始；并发 Run 的身份、序号和预算计数独立。结果通过 `AgentRunResult.RunId` 与事件关联，请求仍只包含用户消息。
+
+开始事件紧接着对应操作的调用，完成事件仅在组件正常返回后产生。`ToolExecutionCompleted(success=false)` 表示执行器返回失败结果；执行器抛异常时不产生该完成事件。模型返回的每个工具提案在 Runtime 验证前产生 `ToolCallProposed`，因此未知工具会有提案，但不会有工具执行开始事件。终止事件携带实际模型调用数和工具调用数。
+
+`IExecutionEventSink` 是可选构造依赖，默认空实现。每个 Run 使用一个安全包装器隔离消费者异常：失败不重试、不回退序号，也不改变 Agent 结果。包装器仅保留内部故障计数供调试，不向 `AgentRunResult` 加入观察者健康字段。消费者自己的取消异常只有在 Run 令牌实际取消时才归为 Run 取消，否则按消费者故障处理。
+
+普通事件使用 Run 的取消令牌；四种终止事件使用 `CancellationToken.None` 尽力投递。预先取消的请求仍获得 RunId、返回 Cancelled 并尝试发送 RunCancelled，但普通事件可能未被观察到。投递失败可能造成序号间隙，当前没有持久化、重放或可靠交付保证。
+
+当前顺序等待进程内 sink，**慢 sink 会增加运行延迟，不返回的 sink 也会阻塞调用**。共享 sink 需要自行保证并发安全；本阶段不引入后台队列或网络传输。
+
+Payload 仅选择性包含计数、调用 ID、工具名称/身份、结束原因和成功状态，不自动复制用户消息、完整参数、输出、最终回答或异常原文。未来接入不可信来源时，仍需单独设计名称等元数据的脱敏和大小限制。
+
+领域脚本中的业务检查只是确定性模拟。未来真实模型适配器负责协议转换，通用工具执行器转发可信调用，业务系统负责权限、业务校验和数据一致性；这些规则不应迁入 Core。
+
 ## 测试与代码阅读
 
 Core 测试只引用 Core，使用记录型替身验证控制流；集成测试引用 Core 和 Infrastructure，通过薄记录包装器转发给真实领域实现。Console 使用相同的真实领域组件。
@@ -135,6 +164,8 @@ Core 测试只引用 Core，使用记录型替身验证控制流；集成测试�
 测试覆盖成功闭环、未知工具、两种预算限制、工具失败、预先取消、错误关联 ID、重复注册身份、空或重复调用 ID、多工具顺序以及 JSON 生命周期。
 
 集成测试验证四个领域场景、宠物目录拒绝未注册的航班工具，以及四种脚本不会对错误业务结果返回成功确认。
+
+事件测试验证语义顺序、关联和序号、四种终止状态、投递故障隔离、sink 自发取消、Run 取消令牌传播、并发 Run、失败投递不重试以及 Payload 范围。原 Phase 1/2 测试不依赖事件展示文本。
 
 建议按以下顺序阅读：
 
@@ -147,13 +178,14 @@ Core 测试只引用 Core，使用记录型替身验证控制流；集成测试�
 
 Phase 2 建议继续阅读 [领域迁移测试](tests/PortableAgent.IntegrationTests/DomainPortabilityTests.cs)、[宠物脚本](src/PortableAgent.Infrastructure/Models/PetBoardingScriptedModelProvider.cs) 和 [宠物执行器](src/PortableAgent.Infrastructure/Tools/PetBoarding/PetBoardingToolExecutor.cs)，再对照 FlightBooking 的对应实现。
 
+Phase 3 建议阅读 [事件契约](src/PortableAgent.Core/Execution/Events/ExecutionEvent.cs)、[安全 sink](src/PortableAgent.Core/Execution/Events/SafeExecutionEventSink.cs)、[事件测试](tests/PortableAgent.Core.Tests/ExecutionEventTests.cs) 和 [Console renderer](src/PortableAgent.Console/ConsoleExecutionEventSink.cs)。
+
 ## 后续方向
 
 以下是分阶段计划，不代表当前已经支持：
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 3 | 结构化执行事件与 Console Trace |
 | Phase 4 | 策略、审批，以及已持久化待审批 Run 的重启恢复 |
 | Phase 5 | MCP 适配器与协议迁移验证 |
 | Phase 6 | ASP.NET Core API、HTTP 命令与 SSE 订阅 |

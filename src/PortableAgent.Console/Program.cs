@@ -1,12 +1,14 @@
 using PortableAgent.Core.Execution;
+using PortableAgent.Console;
 using PortableAgent.Infrastructure.Models;
 using PortableAgent.Infrastructure.Tools.PetBoarding;
 using PortableAgent.Infrastructure.Tools.FlightBooking;
 
+var eventSink = new ConsoleExecutionEventSink();
 var petRunner = new AgentRunner(new PetBoardingScriptedModelProvider(),
-    new PetBoardingToolProvider(), new PetBoardingToolExecutor(), new RunLimits());
+    new PetBoardingToolProvider(), new PetBoardingToolExecutor(), new RunLimits(), eventSink);
 var flightRunner = new AgentRunner(new FlightBookingScriptedModelProvider(),
-    new FlightBookingToolProvider(), new FlightBookingToolExecutor(), new RunLimits());
+    new FlightBookingToolProvider(), new FlightBookingToolExecutor(), new RunLimits(), eventSink);
 
 Console.WriteLine("=== Pet Boarding ===");
 var petRequest = new AgentRunRequest("Has Cooper eaten today?");
