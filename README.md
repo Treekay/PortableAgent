@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化与待审批检查点重启恢复）、Phase 5A（最小 MCP 适配）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 可迁移性与远程写操作审批恢复）已完成。**
 
-当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订使用不同的模型和工具组合，共用 Core。Phase 5A 新增单来源 MCP 只读工具闭环；真实模型、Agent HTTP API、执行事件 SSE、Studio 尚未实现。
+当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。真实模型、Agent HTTP API、执行事件 SSE、Studio 尚未实现。
 
 已支持：
 
@@ -29,7 +29,7 @@
 | Flight Booking | `get_booking` | `flight-local / booking.get` |
 | Flight Booking | `cancel_booking` | `flight-local / booking.cancel` |
 
-业务工具仍返回固定模拟结果，没有实际取消航班或创建员工任务。SQLite 保存的是 Runtime 状态和事件，不是业务系统数据库。`my booking` 固定对应 NZ123，不代表用户身份或资源授权。
+本地工具仍返回固定模拟结果。Phase 5B 的独立 MCP sample 会实际修改其进程内订单和任务状态，不连接真实航空公司或寄养业务。SQLite 保存的是 Runtime 状态和事件，不是业务系统数据库。`my booking` 固定对应 NZ123，不代表用户身份或资源授权。
 
 ## 快速开始：真正的跨进程恢复
 
@@ -104,9 +104,12 @@ src/
     McpToolAdapter.cs       同时实现 provider/executor，管理单客户端
     McpToolMapper.cs        发现、参数和结果映射
     McpResultJson.cs        显式 structuredContent null 的 SDK JSON 转换
-  PortableAgent.Console/   init / pause / approve / reject / mcp-status
+  PortableAgent.Console/   原有命令 + mcp-pet-* / mcp-flight-*
+    McpDomainDemo.cs       两个独立 MCP 来源的可信装配
 samples/
   PortableAgent.Sample.McpServer/  独立 ASP.NET Core MCP 服务，仅一个工具
+  PortableAgent.Sample.PetBoardingMcpServer/  护理记录、进程内员工任务
+  PortableAgent.Sample.FlightBookingMcpServer/  进程内订单与取消操作
 tests/
   PortableAgent.Core.Tests/
   PortableAgent.IntegrationTests/
@@ -120,14 +123,14 @@ Console → Core + Infrastructure + Persistence + Adapters.Mcp
 Infrastructure → Core
 Persistence → Core
 Adapters.Mcp → Core + 官方 ModelContextProtocol.Core
-Sample.McpServer → 官方 ModelContextProtocol.AspNetCore（不引用任何 PortableAgent 运行时项目）
+三个 Sample MCP Server → 官方 ModelContextProtocol.AspNetCore（不引用任何 PortableAgent 运行时项目）
 Core.Tests → Core
 IntegrationTests → Core + Infrastructure
 Persistence.Tests → Core + Infrastructure + Persistence
-Adapters.Mcp.Tests → Adapters.Mcp + Infrastructure + Persistence + Sample.McpServer
+Adapters.Mcp.Tests → Adapters.Mcp + Infrastructure + Persistence + 三个 Sample MCP Server
 ```
 
-Core 不引用 EF Core、SQLite、模型 SDK、MCP、ASP.NET Core 或业务类型。无 DI 容器、通用 repository、UnitOfWork 或额外 service 包装。
+Core 不引用 EF Core、SQLite、模型 SDK、MCP、ASP.NET Core 或业务类型。Runtime 不引入 DI 容器、通用 repository 或 UnitOfWork；服务器使用 ASP.NET Core 宿主注册自己的业务状态。
 
 ## Phase 5A：MCP 协议适配
 
@@ -187,7 +190,64 @@ IsError 为 true 且内容可映射时，返回 Executed + IsSuccess=false，Err
 
 RunState 仍只保存 Core 数据，不保存客户端、连接、会话 ID 或 MCP 对象；通用 Runtime 事件与 SQLite schema 不变。MCP 审批恢复边界可沿用既有机制，但 Phase 5A 未新增写操作或审批演示。
 
-远程请求发出后的网络故障不证明业务副作用未发生，取消也不代表回滚。错误回到模型、远程写操作不确定性、重连/超时、多来源、别名、认证、富内容和更高并发留到 Phase 5B/5C。
+远程请求发出后的网络故障不证明业务副作用未发生，取消也不代表回滚。错误回到模型、远程写操作不确定性、重连/超时、多来源、别名、认证、富内容和更高并发留到 Phase 5C。
+
+## Phase 5B：领域 MCP 与远程审批
+
+两个 sample 使用官方 MCP SDK 2.2.0、Streamable HTTP 和 `HttpServerSessionMode.Stateless`。协议会话无状态，业务应用仍各自持有进程内单例状态；服务器重启会重置业务数据。Core、Persistence、Adapters.Mcp 以及两个领域 scripted model 相对 Phase 5A 均零修改。
+
+| 业务 | 默认端点 | SourceId | RuntimeDefinitionId |
+| --- | --- | --- | --- |
+| Pet | `http://localhost:5102/mcp` | `pet-mcp` | `pet-mcp-demo-v1` |
+| Flight | `http://localhost:5103/mcp` | `flight-mcp` | `flight-mcp-demo-v1` |
+
+每套 Runtime 只连接一个来源，两套装配共用同一种 `McpToolAdapter`。Phase 5A 的 `localhost:5101/mcp` 保留。可信配置由宿主维护，RuntimeDefinitionId 不从 URL 推导；实质更换业务绑定应使用新的身份。
+
+| 可信 ToolId | Runtime 策略 |
+| --- | --- |
+| `pet-mcp/get_care_records` | Allow |
+| `pet-mcp/create_staff_task` | Deny |
+| `flight-mcp/get_booking` | Allow |
+| `flight-mcp/cancel_booking` | RequireApproval，`confirm-flight-cancellation-v1` |
+
+在独立终端启动所需服务器：
+
+```sh
+dotnet run --project samples/PortableAgent.Sample.PetBoardingMcpServer
+dotnet run --project samples/PortableAgent.Sample.FlightBookingMcpServer
+```
+
+另一个终端从仓库根目录运行：
+
+```sh
+dotnet run --project src/PortableAgent.Console -- init
+dotnet run --project src/PortableAgent.Console -- mcp-pet-read
+dotnet run --project src/PortableAgent.Console -- mcp-pet-denied-task
+dotnet run --project src/PortableAgent.Console -- mcp-flight-read
+dotnet run --project src/PortableAgent.Console -- mcp-flight-pause
+```
+
+`pause` 输出 RunId、ApprovalId 后自然退出，服务器保持运行。用另一个 Console 进程提交原来的两个 ID：
+
+```sh
+dotnet run --project src/PortableAgent.Console -- mcp-flight-approve <runId> <approvalId>
+```
+
+新 Runtime 从 SQLite 加载冻结调用，CAS 取得审批所有权，重新远程发现工具、比较契约、评估当前策略，然后调用远端 `cancel_booking`，最后才让模型继续。相同 RunId 的事件从第 9 条 ApprovalRequired 延续到第 20 条 RunCompleted。
+
+也可以对尚未解决的审批执行：
+
+```sh
+dotnet run --project src/PortableAgent.Console -- mcp-flight-reject <runId> <approvalId>
+```
+
+拒绝会重新发现工具，但不会调用远端取消操作。建议先演示一次拒绝，再创建新的暂停 Run 演示批准，使拒绝检查使用尚未取消的订单。
+
+Flight 服务器维护 NZ123 的真实状态。重复取消返回已有的 cancelled，`CancelCallCount` 增加、`CancelMutationCount` 不增加。这只是业务幂等示例，不是 Runtime exactly-once 保证。服务器不接收审批 ID、RunId 或 Runtime 策略。
+
+现有 Flight 查询脚本只接受 confirmed，因此请在取消前执行 `mcp-flight-read`；取消后的状态在测试中通过服务状态和直接 MCP 查询验证。Pet 模型也仍是固定样例：主路径拒绝写操作，独立业务测试验证真实创建任务。
+
+完整的实际跨进程批准/拒绝记录、网络调用计数、业务变更计数和 SQLite 事件验证见 [Phase 5B 验证记录](docs/phase5b-verification.md)。
 
 ## 策略和恢复边界
 
@@ -293,16 +353,16 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 ## 测试与阅读顺序
 
-`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**164 通过，0 失败，0 跳过**。
+`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**184 通过，0 失败，0 跳过**。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
 | Core.Tests | 30 | 执行循环、校验、预算、取消、事件语义 |
 | IntegrationTests | 40 | 领域迁移、策略、批次、内存审批与并发 |
 | Persistence.Tests | 48 | DTO、独立 Store、重启批准/拒绝、SQLite CAS、事务故障、事件顺序 |
-| Adapters.Mcp.Tests | 46 | 真实 Kestrel/MCP、JSON 类型、路由、取消、生命周期、通用事件和 SQLite |
+| Adapters.Mcp.Tests | 66 | 原 46 项 + 20 项领域迁移、业务状态、远程审批恢复和契约变化测试 |
 
-Phase 5A 未修改前 118 个测试。Phase 4B 的原有 70 个测试保留行为断言，仅调整配置身份和 Store 签名；原“暂停保存失败”替身从 Create 故障改为暂停 Replace 故障，继续验证相同边界。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
+Phase 5B 保留全部原有 164 项测试，新增 20 项。Phase 5A 未修改前 118 个测试。Phase 4B 的原有 70 个测试保留行为断言，仅调整配置身份和 Store 签名；原“暂停保存失败”替身从 Create 故障改为暂停 Replace 故障，继续验证相同边界。持久化测试使用独立临时文件数据库，关闭连接池，释放上下文并清理自身文件，不复用演示数据库。事务故障通过 SQLite trigger 注入，测试真实数据库回滚。
 
 建议依次阅读 [Console](src/PortableAgent.Console/Program.cs)、[AgentRunner](src/PortableAgent.Core/Execution/AgentRunner.cs)、[AgentMessage](src/PortableAgent.Core/Models/AgentMessage.cs)、[审批测试](tests/PortableAgent.IntegrationTests/ApprovalTests.cs)、[SqliteRunStateStore](src/PortableAgent.Persistence/Sqlite/SqliteRunStateStore.cs)、[快照映射](src/PortableAgent.Persistence/Sqlite/Serialization/RunStateSerializer.cs)、[重启测试](tests/PortableAgent.Persistence.Tests/RestartTests.cs) 和 [事务故障测试](tests/PortableAgent.Persistence.Tests/TransactionTests.cs)。
 
@@ -310,7 +370,6 @@ Phase 5A 未修改前 118 个测试。Phase 4B 的原有 70 个测试保留行�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 5B | Pet/Flight MCP 服务与写操作审批、重启恢复 |
 | Phase 5C | 远程失败语义、重连/超时、并发、多来源、别名、认证及富内容 |
 | Phase 6 | ASP.NET Core API、HTTP 命令与 SSE 订阅 |
 | Phase 7 | Developer Studio：Chat 与内联执行进度 |

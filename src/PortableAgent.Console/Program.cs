@@ -13,6 +13,7 @@ Console.WriteLine($"Database path: {databasePath}");
 if (args.Length == 0)
 {
     Console.WriteLine("Commands: init | pause | approve <runId> <approvalId> | reject <runId> <approvalId> | mcp-status");
+    Console.WriteLine(McpDomainDemo.Usage);
     return 0;
 }
 try
@@ -25,18 +26,25 @@ try
     }
     var pause = args is ["pause"];
     var mcpStatus = args is ["mcp-status"];
+    var domainMcp = McpDomainDemo.IsCommand(args[0]);
     var runId = Guid.Empty;
     var approvalId = Guid.Empty;
-    if (!pause && !mcpStatus && !(args.Length == 3 && args[0] is "approve" or "reject"
+    if (!pause && !mcpStatus && !domainMcp && !(args.Length == 3 && args[0] is "approve" or "reject"
         && Guid.TryParse(args[1], out runId) && Guid.TryParse(args[2], out approvalId)))
     {
         Console.Error.WriteLine("Usage: init | pause | approve <runId> <approvalId> | reject <runId> <approvalId> | mcp-status");
+        Console.Error.WriteLine(McpDomainDemo.Usage);
         return 1;
     }
     if (!File.Exists(databasePath))
     {
         Console.Error.WriteLine("Database not found. Run init from this directory first.");
         return 1;
+    }
+    if (domainMcp)
+    {
+        var domainResult = await McpDomainDemo.RunAsync(args, databasePath);
+        return domainResult is null ? 1 : PrintResult(domainResult);
     }
     if (mcpStatus)
     {

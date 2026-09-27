@@ -23,6 +23,8 @@
     <ProjectReference Include="..\..\src\PortableAgent.Infrastructure\PortableAgent.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\PortableAgent.Persistence\PortableAgent.Persistence.csproj" />
     <ProjectReference Include="..\..\samples\PortableAgent.Sample.McpServer\PortableAgent.Sample.McpServer.csproj" />
+    <ProjectReference Include="..\..\samples\PortableAgent.Sample.PetBoardingMcpServer\PortableAgent.Sample.PetBoardingMcpServer.csproj" />
+    <ProjectReference Include="..\..\samples\PortableAgent.Sample.FlightBookingMcpServer\PortableAgent.Sample.FlightBookingMcpServer.csproj" />
   </ItemGroup>
 
 </Project>
