@@ -8,21 +8,20 @@
 
 ## 当前状态
 
-**Phase 1 的第一个实现单元已完成：确定性的本地工具调用闭环。**
+**Phase 0 架构基线、Phase 1 最小执行循环、Phase 2 本地领域可迁移性验证已完成。**
 
-当前没有接入真实大模型。`ScriptedModelProvider` 是固定脚本，不解析用户意图；无需 API Key，也不会调用模型服务。两个业务领域的迁移验证尚未实现。
+当前没有接入真实大模型。模型实现都是固定脚本，仅识别约定的演示输入；无需 API Key，也不会调用模型服务。宠物寄养与航班预订通过不同的模型和工具组合，共用同一个 `AgentRunner` 和 Core 程序集。本阶段没有修改 Core。
+
+这仍是本地模拟验证，不是完整 Agent 平台。MCP、策略、审批、持久化、执行事件、API 和 Studio 均未实现。
 
 演示流程：
 
 ```text
-固定用户消息：Calculate 2 + 3.
-  → AgentRunner 加载本地工具目录
-  → 脚本模型提出 calculator_add(a = 2, b = 3)
-  → Runtime 查找可信工具并检查预算
-  → 本地工具返回 { "result": 5 }
-  → Runtime 将关联的工具结果加入对话
-  → 脚本模型验证结果并返回 The result is 5.
-  → Completed
+PetBoardingScriptedModelProvider + PetBoardingToolProvider + PetBoardingToolExecutor
+  → AgentRunner → get_care_records → JSON 结果 → 模型验证 → Completed
+
+FlightBookingScriptedModelProvider + FlightBookingToolProvider + FlightBookingToolExecutor
+  → AgentRunner → get_booking → JSON 结果 → 模型验证 → Completed
 ```
 
 已实现：
@@ -37,6 +36,16 @@
 - `Completed`、`Failed`、`Cancelled`、`LimitReached` 四种终止状态。
 - 通过 Runner 构造函数传入的可信 `RunLimits`，默认最多 4 次模型调用和 4 次工具调用。
 - JSON 生命周期处理，以及围绕执行循环的 14 个自动化测试用例。
+- 两个领域各自的查询与模拟操作，以及 9 个集成测试用例。
+
+| 领域 | 模型可见工具 | 可信内部 ToolId |
+| --- | --- | --- |
+| Pet Boarding | `get_care_records` | `pet-local / care.get_records` |
+| Pet Boarding | `create_staff_task` | `pet-local / staff.create_task` |
+| Flight Booking | `get_booking` | `flight-local / booking.get` |
+| Flight Booking | `cancel_booking` | `flight-local / booking.cancel` |
+
+员工任务创建和取消预订都返回固定模拟结果，没有外部调用或持久化；取消后的再次查询仍返回固定的 confirmed 预订。`my booking` 固定指向 NZ123，不代表已实现用户身份或授权。
 
 本单元中，工具失败会直接终止运行，不自动重试。取消采用标准 `CancellationToken` 协作机制；尚无超时框架。
 
@@ -56,11 +65,16 @@ dotnet run --project src/PortableAgent.Console
 Console 预期输出：
 
 ```text
-Status: Completed
-The result is 5.
+=== Pet Boarding ===
+Has Cooper eaten today?
+Yes. Cooper was fed at 08:00.
+
+=== Flight Booking ===
+Show my booking.
+Booking NZ123 is confirmed from Auckland to Sydney on 2026-10-10.
 ```
 
-Console 目前仅执行一次固定演示，不提供交互式聊天。修改用户文本不会使脚本模型变成通用计算助手。
+Console 顺序执行两次独立组合的查询演示，没有菜单或交互式聊天。两个模拟操作场景由集成测试覆盖。Phase 1 的加法脚本、Provider 和 Executor 原样保留，但不再是默认 Console 演示。
 
 ## 项目结构与依赖
 
@@ -72,14 +86,19 @@ src/
     Models/             中立模型契约和结构化消息
     Tools/              工具身份、定义、调用、结果及接口
   PortableAgent.Infrastructure/
-    Models/             确定性 ScriptedModelProvider
-    Tools/              本地工具目录与加法执行器
+    Models/             加法、PetBoarding、FlightBooking 脚本
+    Tools/              原有加法工具
+      PetBoarding/      宠物工具目录与执行器
+      FlightBooking/    航班工具目录与执行器
   PortableAgent.Console/
     Program.cs          直接通过构造函数组合依赖并运行演示
 tests/
   PortableAgent.Core.Tests/
     AgentRunnerTests.cs
     TestDoubles/        记录模型请求和工具调用的测试替身
+  PortableAgent.IntegrationTests/
+    DomainPortabilityTests.cs
+    RecordingWrappers.cs
 ```
 
 ```text
@@ -87,6 +106,7 @@ Console ────────────→ Core
    └→ Infrastructure ─→ Core
 
 Core.Tests ─────────→ Core
+IntegrationTests ───→ Core + Infrastructure
 ```
 
 Core 不依赖模型 SDK、MCP、EF Core、ASP.NET Core 或业务领域类型。当前没有 DI 容器，Console 中的组合关系可以直接阅读。
@@ -110,9 +130,11 @@ ModelName: calculator_add
 
 ## 测试与代码阅读
 
-Core 测试只引用 Core，使用记录型替身验证控制流；Console 演示使用 Infrastructure 中的实际脚本和本地加法实现。
+Core 测试只引用 Core，使用记录型替身验证控制流；集成测试引用 Core 和 Infrastructure，通过薄记录包装器转发给真实领域实现。Console 使用相同的真实领域组件。
 
 测试覆盖成功闭环、未知工具、两种预算限制、工具失败、预先取消、错误关联 ID、重复注册身份、空或重复调用 ID、多工具顺序以及 JSON 生命周期。
+
+集成测试验证四个领域场景、宠物目录拒绝未注册的航班工具，以及四种脚本不会对错误业务结果返回成功确认。
 
 建议按以下顺序阅读：
 
@@ -123,14 +145,14 @@ Core 测试只引用 Core，使用记录型替身验证控制流；Console 演�
 5. [脚本模型](src/PortableAgent.Infrastructure/Models/ScriptedModelProvider.cs)：查看它如何根据对话结构确定阶段。
 6. [本地工具执行器](src/PortableAgent.Infrastructure/Tools/LocalToolExecutor.cs)：查看可信内部身份如何对应实际操作。
 
+Phase 2 建议继续阅读 [领域迁移测试](tests/PortableAgent.IntegrationTests/DomainPortabilityTests.cs)、[宠物脚本](src/PortableAgent.Infrastructure/Models/PetBoardingScriptedModelProvider.cs) 和 [宠物执行器](src/PortableAgent.Infrastructure/Tools/PetBoarding/PetBoardingToolExecutor.cs)，再对照 FlightBooking 的对应实现。
+
 ## 后续方向
 
 以下是分阶段计划，不代表当前已经支持：
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 1 后续 | 在审阅当前闭环后，逐步推进最小本地 Runtime |
-| Phase 2 | 复核契约，用两个本地微型业务验证领域迁移 |
 | Phase 3 | 结构化执行事件与 Console Trace |
 | Phase 4 | 策略、审批，以及已持久化待审批 Run 的重启恢复 |
 | Phase 5 | MCP 适配器与协议迁移验证 |
