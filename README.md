@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）、Phase 6B（持久化回放与实时 SSE）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）、Phase 6B（持久化回放与实时 SSE）、Phase 7A（Developer Studio Chat）已完成。**
 
-当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。现已提供 ASP.NET Core 命令、查询及执行事件 SSE；真实模型与 Studio 尚未实现。
+当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。现已提供 ASP.NET Core 命令、查询及执行事件 SSE，以及 React Studio 的独立任务、内联进度与审批界面；真实模型尚未实现。
 
 已支持：
 
@@ -24,6 +24,7 @@
 - **AwaitingApproval 成功保存 → 进程退出 → 新进程批准/拒绝 → 恢复同一个 Run。**
 - HTTP 列出 Agent、启动、查询、批准/拒绝与取消活动 Run；开始和审批均在持久化提交后返回 202，执行不依赖 HTTP 连接存续。
 - SSE 从 SQLite 回放事件并跟随新进度，支持按 Sequence 重连；断开或慢订阅者溢出不会取消 Run。
+- Studio 从 API 读取 Agent，展示分组执行进度、只读审批参数、取消请求与持久化最终回答；错误、传输状态和 Runtime 状态分开管理。
 
 | 领域 | 模型可见工具 | 可信 ToolId |
 | --- | --- | --- |
@@ -79,6 +80,51 @@ dotnet run --project src/PortableAgent.Console -- reject <run-id> <approval-id>
 
 [Phase 4B 验证记录](docs/phase4b-verification.md) 包含实际进程输出、SQLite 表结构、测试结果与边界说明。
 
+## Phase 7A：启动 Developer Studio
+
+需要 .NET 10 SDK 和 Node.js（已验证 **22.22.1 / npm 10.9.4**）。先在根目录执行 `dotnet build PortableAgent.sln`，再分别打开终端，从根目录启动：
+
+```sh
+# 终端 1：Pet MCP，localhost:5102
+dotnet run --project samples/PortableAgent.Sample.PetBoardingMcpServer
+
+# 终端 2：Flight MCP，localhost:5103
+dotnet run --project samples/PortableAgent.Sample.FlightBookingMcpServer
+
+# 终端 3：API，localhost:5100；自动初始化当前目录中的 SQLite
+dotnet run --project src/PortableAgent.Api
+
+# 终端 4：Studio
+cd src/PortableAgent.Studio
+npm install
+npm run dev
+```
+
+打开 [http://localhost:5173](http://localhost:5173)。浏览器 POST、GET 和原生 EventSource 均使用相对 `/api/...`，由 Vite 直接代理到 5100；无需后端 CORS。5173 被占用时直接报错，不自动换端口。
+
+- **每条消息是独立 Run**，不会把前面的消息传给下一次请求；没有 Session。一个非终态 Run 期间锁定发送和 Agent 切换，但可以编辑下一条草稿。
+- **刷新页面会清空当前 Studio 历史**，不使用 localStorage，不自动找回 Run。关闭页面只停止观察，不取消后台执行。
+- Flight 选择 `Cancel my booking.`：核对 `flight-mcp / cancel_booking` 和只读 `{"bookingId":"NZ123"}` 后批准或拒绝；202 只表示命令已接收，状态继续由 SSE/GET 确认。
+- Pet 可试 `Has Cooper eaten today?` 和 `Ask the staff to give Cooper some fresh water.`；后一条展示策略拒绝，不出现审批按钮。
+- `Cancel run` 仅在 Running 且最新可用快照确认本宿主仍在执行时显示。202 显示 Cancelling，收到终态后才显示 Cancelled；不代表业务回滚。
+- 普通 SSE 断连交给 EventSource 原生重连；解析错误关闭连接并查询状态，可显式从最后一个精确 Sequence 重连。每 12 秒的非重叠 GET 仅做安全同步，不替代执行事件。
+- `/api/agents` 加载失败保留页面并显示 API unavailable 和 Retry。启动 POST 结果未知时不自动重发，保留消息与重复执行风险提示，需要显式释放当前任务后才可再次发送。
+- Completed 的最终回答来自 GET Run，以普通文本显示在执行卡片下面，成功读取后只自动折叠一次。无模型 token 流、隐藏推理、Trace / Tools / Graph 页面。
+
+前端验证：
+
+```sh
+cd src/PortableAgent.Studio
+npm run build
+npm test
+npx playwright install chromium
+npm run test:e2e
+```
+
+浏览器测试运行前先停止手动启动的四个开发服务，且在仓库根目录完成 Debug `dotnet build`。Playwright 自动启动真实 Pet/Flight MCP、API、Vite，使用独立 `TestResults/phase7a-*.db`，结束后停止测试服务；不复用已有进程。测试输出与截图在 Studio 的 `test-results/`，不纳入 Git。
+
+[Phase 7A 验证记录](docs/phase7a-verification.md) 包含依赖精确版本、状态与竞态设计、49 项前端测试、2 项浏览器验收及 SSE 增量证据。
+
 ## 项目结构与依赖
 
 ```text
@@ -114,6 +160,14 @@ src/
     Endpoints/            Agent、Run、审批、取消和 ProblemDetails
     Hosting/              Registry、Coordinator、提交确认信号和 Store 装饰器
     Streaming/            通知 Hub、有界独立订阅、SQLite 补读与 SSE DTO
+  PortableAgent.Studio/    React + TypeScript + Vite，独立前端构建
+    src/api/              HTTP DTO、ProblemDetails、原生 EventSource
+    src/features/agents/  API Agent 列表与选择器
+    src/features/run/     UI 状态、纯 reducer、控制器、分组投影、审批与消息
+    src/components/       页面外壳和连接状态
+    src/styles/           CSS 变量、布局、窄屏和 reduced-motion
+    src/test/             Vitest / RTL 辅助
+    e2e/                  真实 Flight / Pet Playwright 验收
 samples/
   PortableAgent.Sample.McpServer/  独立 ASP.NET Core MCP 服务，仅一个工具
   PortableAgent.Sample.PetBoardingMcpServer/  护理记录、进程内员工任务
@@ -130,6 +184,7 @@ dotnet-tools.json          固定版本的本地 dotnet-ef 工具
 ```text
 Console → Core + Infrastructure + Persistence + Adapters.Mcp
 Api → Core + Infrastructure + Persistence + Adapters.Mcp
+Studio → 同源 /api HTTP + SSE（不引用后端项目，不加入 .sln）
 Infrastructure → Core
 Persistence → Core
 Adapters.Mcp → Core + 官方 ModelContextProtocol.Core
@@ -489,6 +544,8 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 `dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**268 通过，0 失败，0 跳过**。
 
+Phase 7A 前端：`npm run build` 通过，`npm test` **49 通过**，`npm run test:e2e` **2 通过**。Core / Persistence / MCP adapter / API 生产文件均为 0 变更。
+
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
 | Core.Tests | 41 | 执行循环、批次失败恢复、预算、策略重评估、取消、事件契约、可信预分配 RunId |
@@ -505,7 +562,7 @@ Phase 6B 在 Phase 6A 的 234 项基线上新增 34 项 API 测试，原测试�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 7 | Developer Studio：Chat 与内联执行进度 |
+| Phase 7B（尚未实现） | Developer Studio：Trace / Tools / Graph，另行设计与批准 |
 | 后续按需 | MCP 多来源、别名、认证、富内容、超时/连接生命周期及并发增强 |
 
 Phase 5A 已实现可信单来源绑定、名称一致性和参数对象检查；通用 Schema 校验、凭据/资源授权与远程副作用恢复仍待后续设计。RuntimeDefinitionId 由配置方维护。未实现多 Agent、RAG、向量数据库、分布式执行、动态插件或工作流图引擎。
