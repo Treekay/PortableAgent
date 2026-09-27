@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using PortableAgent.Api.Endpoints;
 using PortableAgent.Api.Hosting;
+using PortableAgent.Api.Streaming;
 using PortableAgent.Core.Execution;
 using PortableAgent.Persistence.Sqlite;
 
@@ -19,6 +20,9 @@ public static class ApiApplication
             services.GetRequiredService<IConfiguration>()["DatabasePath"] ?? "portable-agent.db")));
         builder.Services.AddSingleton(services => new SqliteRunStateStore(services.GetRequiredService<ApiDatabase>().Path));
         builder.Services.AddSingleton<RunOperationSignals>();
+        builder.Services.AddSingleton<RunEventHub>();
+        builder.Services.AddSingleton<RunEventStreamSettings>();
+        builder.Services.AddSingleton<RunEventStream>();
         builder.Services.AddSingleton<IRunStateStore>(services => new AcknowledgingRunStateStore(
             services.GetRequiredService<SqliteRunStateStore>(), services.GetRequiredService<RunOperationSignals>()));
         builder.Services.AddSingleton(ApiRuntimeConfiguration.CreateRegistry);
@@ -27,11 +31,17 @@ public static class ApiApplication
         builder.Services.AddHostedService(services => services.GetRequiredService<RunExecutionCoordinator>());
         configure?.Invoke(builder);
         var app = builder.Build();
+        app.Lifetime.ApplicationStopping.Register(app.Services.GetRequiredService<RunEventHub>().Stop);
         app.Use(async (context, next) =>
         {
             try { await next(context); }
             catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
             { /* The request ended; any admitted operation remains owned by the Coordinator. */ }
+            catch (Exception exception) when (context.Response.HasStarted)
+            {
+                app.Logger.LogWarning(exception, "Response ended after headers were sent");
+                context.Abort();
+            }
             catch (ApiProblem problem) { await problem.Result().ExecuteAsync(context); }
             catch (BadHttpRequestException)
             { await new ApiProblem(400, "invalid_request", "The request body or parameters are invalid.").Result().ExecuteAsync(context); }
@@ -43,6 +53,7 @@ public static class ApiApplication
         });
         app.MapAgentEndpoints();
         app.MapRunEndpoints();
+        app.MapRunEventEndpoints();
         return app;
     }
 }

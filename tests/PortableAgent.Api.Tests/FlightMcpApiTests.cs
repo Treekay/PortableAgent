@@ -18,6 +18,31 @@ namespace PortableAgent.Api.Tests;
 
 public sealed class FlightMcpApiTests
 {
+    [Fact]
+    public async Task Flight_approval_is_observed_on_one_continuous_SSE_connection()
+    {
+        using var db = new DatabaseFile();
+        await using var flight = await FlightServer.StartAsync();
+        await using var api = await ApiTestHost.StartAsync(db, flightEndpoint: flight.Endpoint);
+        var id = await api.StartRunAsync("Cancel my booking.", "flight");
+        using var stream = await SseClient.OpenAsync(api.Client, id);
+        await stream.UntilAsync("ApprovalRequired");
+        var pending = await api.WaitAsync(id, "AwaitingApproval");
+        Assert.Equal(0, flight.State.CancelCallCount);
+        Assert.Equal(HttpStatusCode.Accepted, (await api.ApproveAsync(id, pending.PendingApproval!.ApprovalId)).StatusCode);
+        await stream.ReadToEndAsync();
+        Assert.Equal(new[] { "RunStarted", "ToolDiscoveryStarted", "ToolDiscoveryCompleted", "ModelTurnStarted", "ModelTurnCompleted",
+            "ToolCallProposed", "PolicyEvaluationStarted", "PolicyEvaluationCompleted", "ApprovalRequired", "ApprovalResolved", "RunResumed",
+            "ToolDiscoveryStarted", "ToolDiscoveryCompleted", "PolicyEvaluationStarted", "PolicyEvaluationCompleted", "ToolExecutionStarted",
+            "ToolExecutionCompleted", "ModelTurnStarted", "ModelTurnCompleted", "RunCompleted" }, stream.Events.Select(e => e.EventType));
+        Assert.Equal(Enumerable.Range(1, 20).Select(n => (long)n), stream.Events.Select(e => e.Sequence));
+        Assert.All(stream.Events, e => Assert.Equal(id, e.RunId));
+        Assert.Equal("Booking NZ123 has been cancelled.", (await api.WaitAsync(id, "Completed")).FinalText);
+        Assert.Equal(1, flight.State.CancelCallCount);
+        Assert.Equal(1, flight.State.CancelMutationCount);
+        Assert.Equal("cancelled", flight.State.GetBooking("NZ123").Status);
+    }
+
     [Theory]
     [InlineData("approve", 1, "cancelled")]
     [InlineData("reject", 0, "confirmed")]

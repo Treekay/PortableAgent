@@ -23,7 +23,7 @@ public sealed class CommandQueryTests
     }
 
     [Fact]
-    public async Task Agents_expose_only_public_names_and_SSE_is_not_implemented()
+    public async Task Agents_expose_only_public_names_and_unknown_run_stream_is_not_found()
     {
         using var db = new DatabaseFile();
         await using var host = await ApiTestHost.StartAsync(db);

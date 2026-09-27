@@ -6,9 +6,9 @@
 
 ## 当前状态
 
-**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）已完成。**
+**Phase 0–3、Phase 4A（策略与内存审批）、Phase 4B（SQLite 持久化）、Phase 5A（最小 MCP 适配）、Phase 5B（领域 MCP 与远程审批）、Phase 5C（工具失败恢复与远端结果语义）、Phase 6A（HTTP 命令与查询 API）、Phase 6B（持久化回放与实时 SSE）已完成。**
 
-当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。现已提供 ASP.NET Core 命令与查询 API；真实模型、执行事件 SSE、Studio 尚未实现。
+当前模型都是确定性脚本，只识别约定演示输入，无需 API Key。宠物寄养与航班预订复用原有领域模型、同一个 Core 和同一种 MCP adapter，连接两个独立业务服务器。现已提供 ASP.NET Core 命令、查询及执行事件 SSE；真实模型与 Studio 尚未实现。
 
 已支持：
 
@@ -23,6 +23,7 @@
 - 正常工具失败进入模型会话，模型可以解释或显式提出新的尝试；Runtime 不自动重试。
 - **AwaitingApproval 成功保存 → 进程退出 → 新进程批准/拒绝 → 恢复同一个 Run。**
 - HTTP 列出 Agent、启动、查询、批准/拒绝与取消活动 Run；开始和审批均在持久化提交后返回 202，执行不依赖 HTTP 连接存续。
+- SSE 从 SQLite 回放事件并跟随新进度，支持按 Sequence 重连；断开或慢订阅者溢出不会取消 Run。
 
 | 领域 | 模型可见工具 | 可信 ToolId |
 | --- | --- | --- |
@@ -112,6 +113,7 @@ src/
     Contracts/            专用公开请求与响应 DTO
     Endpoints/            Agent、Run、审批、取消和 ProblemDetails
     Hosting/              Registry、Coordinator、提交确认信号和 Store 装饰器
+    Streaming/            通知 Hub、有界独立订阅、SQLite 补读与 SSE DTO
 samples/
   PortableAgent.Sample.McpServer/  独立 ASP.NET Core MCP 服务，仅一个工具
   PortableAgent.Sample.PetBoardingMcpServer/  护理记录、进程内员工任务
@@ -181,7 +183,7 @@ Invoke-RestMethod ($base + $accepted.runUrl)
 
 开始请求仅接受 `agentId`、`message`，消息限 1–8000 字符且不能全为空白。未知 JSON 属性（包括 runId、runtimeDefinitionId、endpoint）返回 400；审批只接受字符串 `approve` / `reject`，不接受数值枚举或 AgentId。RunId 由可信宿主生成。
 
-开始返回 `{runId,status:"accepted",runUrl}`；审批额外返回 `approvalId`。`accepted` 是命令状态，快速执行可能在响应送达前已经 Completed。开始必须等 Store 成功创建，审批必须等 Store 成功 CAS 且同批包含 ApprovalResolved、RunResumed；信号来自 API Store 装饰器，独立于 live event sink。提交失败不会伪造 202。
+开始返回 `{runId,status:"accepted",runUrl,eventsUrl}`；审批额外返回 `approvalId`。`eventsUrl` 自 Phase 6B 起提供，指向该 Run 的 SSE 端点。`accepted` 是命令状态，快速执行可能在响应送达前已经 Completed。开始必须等 Store 成功创建，审批必须等 Store 成功 CAS 且同批包含 ApprovalResolved、RunResumed；信号来自 API Store 装饰器，独立于 live event sink。提交失败不会伪造 202。
 
 错误使用 `application/problem+json`，包含稳定 `code`：400 `invalid_request`；404 `agent_not_found` / `run_not_found`；409 `approval_conflict` / `run_not_active` / `runtime_unavailable`；503 `host_stopping`；500 `internal_error`。不返回异常原文或堆栈。
 
@@ -193,7 +195,52 @@ Invoke-RestMethod ($base + $accepted.runUrl)
 
 API 重启后可查询历史终态与待审批，并显式恢复兼容的 AwaitingApproval。`isActive` 是当前宿主内存信息，可能出现 `Running + false`；不会扫描或自动恢复 Running。取消只针对当前宿主活动 Running，AwaitingApproval、终态及非活动 Running 均返回 409；取消与完成竞争时以 Runner 最终持久化结果为准。
 
-API **仅供本地开发，无认证、资源授权或前端**。每个 Agent 共享 sample 业务身份，不可作为多租户服务开放。没有 SSE、事件订阅端点、自动重试、崩溃恢复或 exactly-once 保证。完整验证见 [Phase 6A 验证记录](docs/phase6a-verification.md)。
+API **仅供本地开发，无认证、资源授权或前端**。每个 Agent 共享 sample 业务身份，不可作为多租户服务开放。没有自动工具重试、Running 崩溃恢复或 exactly-once 保证。Phase 6A 的历史验证见 [Phase 6A 验证记录](docs/phase6a-verification.md)。
+
+## Phase 6B：SQLite 回放与实时 SSE
+
+新增 `GET /api/runs/{runId}/events`。成功流返回 `200 Content-Type: text/event-stream`，客户端只需既有 HTTP 命令/查询与此端点即可观察执行，不需要访问 C# 对象或 SQLite。
+
+```sh
+# 在开始 Run 后使用响应中的 eventsUrl。Windows PowerShell 使用 curl.exe。
+curl -N "http://localhost:5100/api/runs/<runId>/events?afterSequence=0"
+
+# 断开后从最后收到的完整事件继续；两种游标方式任选其一。
+curl -N -H "Last-Event-ID: 9" "http://localhost:5100/api/runs/<runId>/events"
+curl -N "http://localhost:5100/api/runs/<runId>/events?afterSequence=9"
+```
+
+每条事件的格式为以下三行加一个空行：
+
+```text
+id: 11
+event: RunResumed
+data: {"eventId":"802f18bc-9ffd-456f-89c9-ba0d4aba3092","runId":"ca8a26d5-9ee9-494a-9f15-5a8f71c6bc51","sequence":11,"occurredAt":"2026-09-27T08:09:39.9737837+00:00","eventType":"RunResumed","payload":{}}
+
+```
+
+非空 `Last-Event-ID` 优先，其次是 `afterSequence`，均未提供则从 0 开始。游标使用非负 Int64 十进制数字；非法、负数或溢出返回 400 `invalid_request`，非法 header 不回退到 query。只发送 `Sequence > cursor`，未来游标不重置。Sequence 允许空洞，不等待或伪造缺失的编号。
+
+**RunEventHub 不持久化；SQLite ExecutionEvents 才是事件历史。** API 先确认 Run 存在，注册订阅，再按每页最多 256 条读取数据库。Hub 只发送按 RunId 路由的序号通知；唤醒后清空当前通知队列，再从最后成功写入并刷新的序号补读 SQLite。不会直接发送 Hub 中的内容，重复、延迟、乱序通知均不会产生重复或乱序输出。
+
+每个订阅拥有独立的 256 条有界 Channel。Runner 发布通知只使用非阻塞 TryWrite，不等待网络、数据库或缓冲区容量。订阅溢出后从 Hub 移除、完成 Channel，并取消该订阅的读写令牌以中断阻塞写入；其他订阅与 Run 继续。客户端使用最后收到的 SSE id 重连，SQLite 补齐断开期间的事件。
+
+无通知时约每 15 秒补读一次数据库，补偿 live sink 失败导致的通知遗漏。若没有新事件，发送注释 `: keepalive` 加空行；心跳没有 id，不持久化，也不推进游标。持续通知同样触发数据库补读。
+
+| 状态或事件 | 连接行为 |
+| --- | --- |
+| 未知 Run | 开流前返回 404 `run_not_found` |
+| 终态 Run 且 cursor ≥ snapshotSequence | 返回 204，不打开 SSE，避免 EventSource 无限重连 |
+| 尚未消费的 RunCompleted / RunFailed / RunCancelled / RunLimitReached | 写入并刷新该事件后关闭 |
+| ApprovalRequired | 保持连接；批准或拒绝后，同一连接继续收到 ApprovalResolved、RunResumed 等 |
+| 连接断开、订阅溢出、DB/网络故障 | 清理该订阅；已开流后不插入 ProblemDetails；不取消 Run |
+| 宿主关闭 | 终止所有订阅；Run 关闭仍由 Coordinator 负责 |
+
+SSE 游标来自最后成功发送的 ExecutionEvent.Sequence，Running 的 snapshotSequence 可能滞后，不能用作最新事件游标。重启后非活动 Running 仍只回放现有事件并保持心跳，不伪造终态；未来 Studio 可查询 isActive=false 后停止跟随。
+
+SSE 保留既有事件脱敏边界，不添加提示词、工具参数/输出、最终回答或异常原文。收到终态后通过 `GET /api/runs/{id}` 获取 finalText 与状态。HTTP/SSE 断开不取消运行；每条用户消息仍是独立 Run，无 Session。无 SignalR、WebSocket、单独 history/trace 端点或前端。
+
+真实 Flight 的同一连接审批轨迹、慢连接恢复及丢通知测试见 [Phase 6B 验证记录](docs/phase6b-verification.md)。
 
 ## Phase 5A：MCP 协议适配
 
@@ -412,7 +459,7 @@ Payload 只选择性保存计数、CallId、工具名称/身份、PolicyId、状
 
 `SafeExecutionEventSink` 只隔离 live observer 故障，数据库写入不经过它。live sink 失败不改变运行语义，不重试；历史可通过 Store 重新读取。普通事件使用运行取消令牌，已提交的审批事实和终止事件使用 None 尽力投递。未配置 Store 时保留进程内观察模式。
 
-当前仍顺序等待 sink，慢或不返回的 sink 会阻塞执行。共享 sink 需自行保证并发安全。Phase 4B 本身未包含 HTTP API；Phase 6A 已在独立宿主提供命令与查询，但没有事件后台队列、SSE 或可靠实时交付保证。
+Core 仍顺序等待 sink，其他自定义慢 sink 可能阻塞执行。Phase 6B 的 API Hub 只做非阻塞通知广播，SSE 网络写入在订阅请求中进行；数据库回放与周期补读补偿通知遗漏。Hub 本身不提供持久化交付保证。
 
 ### EF 迁移
 
@@ -440,7 +487,7 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 
 ## 测试与阅读顺序
 
-`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**234 通过，0 失败，0 跳过**。
+`dotnet build PortableAgent.sln`：0 警告、0 错误。`dotnet test PortableAgent.sln`：**268 通过，0 失败，0 跳过**。
 
 | 项目 | 用例数 | 重点 |
 | --- | ---: | --- |
@@ -448,9 +495,9 @@ Phase 4B **只恢复成功持久化的 AwaitingApproval**，通过显式批准�
 | IntegrationTests | 40 | 领域迁移、策略、批次、内存审批与并发 |
 | Persistence.Tests | 49 | DTO、新 disposition 往返、独立 Store、重启批准/拒绝、SQLite CAS、事务故障 |
 | Adapters.Mcp.Tests | 72 | 协议适配、领域迁移、审批恢复、真实工具失败恢复及远端副作用不确定性 |
-| Api.Tests | 32 | 提交确认、独立执行、HTTP 断开、审批/取消/重启、资源释放、真实 Flight MCP |
+| Api.Tests | 66 | 提交确认、独立执行、SSE 回放/连续审批/断连/溢出恢复、资源释放、真实 Flight MCP |
 
-Phase 6A 在 Phase 5C 的 200 项基线上新增 2 项 Core 与 32 项 API 测试，原测试保持通过。Phase 5C 新增的 16 项测试覆盖正常工具失败交回模型，并强化协议异常与持久化故障断言。持久化与 API 测试使用独立临时文件数据库，不复用演示数据库。API 测试通过真实 Kestrel HTTP 连接与受控模型/工具验证异步边界；持久化事务故障测试通过 SQLite trigger 注入真实回滚。
+Phase 6B 在 Phase 6A 的 234 项基线上新增 34 项 API 测试，原测试保持通过；只将旧测试中“无 SSE”的名称调整为未知 Run 的 404 行为。持久化与 API 测试使用独立临时文件数据库，不复用演示数据库。API 测试通过真实 Kestrel HTTP 连接与受控模型/工具验证异步边界，并用受控响应 Stream 确认溢出会中断阻塞写入；持久化事务故障测试通过 SQLite trigger 注入真实回滚。
 
 建议依次阅读 [Console](src/PortableAgent.Console/Program.cs)、[AgentRunner](src/PortableAgent.Core/Execution/AgentRunner.cs)、[AgentMessage](src/PortableAgent.Core/Models/AgentMessage.cs)、[审批测试](tests/PortableAgent.IntegrationTests/ApprovalTests.cs)、[SqliteRunStateStore](src/PortableAgent.Persistence/Sqlite/SqliteRunStateStore.cs)、[快照映射](src/PortableAgent.Persistence/Sqlite/Serialization/RunStateSerializer.cs)、[重启测试](tests/PortableAgent.Persistence.Tests/RestartTests.cs) 和 [事务故障测试](tests/PortableAgent.Persistence.Tests/TransactionTests.cs)。
 
@@ -458,7 +505,6 @@ Phase 6A 在 Phase 5C 的 200 项基线上新增 2 项 Core 与 32 项 API 测�
 
 | 阶段 | 目标 |
 | --- | --- |
-| Phase 6B | SSE 执行事件订阅；等待单独实施授权 |
 | Phase 7 | Developer Studio：Chat 与内联执行进度 |
 | 后续按需 | MCP 多来源、别名、认证、富内容、超时/连接生命周期及并发增强 |
 

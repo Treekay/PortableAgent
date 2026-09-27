@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using PortableAgent.Api.Contracts;
 using PortableAgent.Api.Hosting;
+using PortableAgent.Api.Streaming;
 using PortableAgent.Core.Execution;
 using PortableAgent.Core.Execution.Events;
 using PortableAgent.Core.Models;
@@ -45,8 +46,9 @@ internal sealed class ApiTestHost(WebApplication app, HttpClient client) : IAsyn
     public WebApplication App { get; } = app;
     public HttpClient Client { get; } = client;
     public RunExecutionCoordinator Coordinator => App.Services.GetRequiredService<RunExecutionCoordinator>();
+    public RunEventHub Hub => App.Services.GetRequiredService<RunEventHub>();
     public static async Task<ApiTestHost> StartAsync(DatabaseFile db, TestRuntime? runtime = null, StoreControl? control = null,
-        string? flightEndpoint = null)
+        string? flightEndpoint = null, Action<WebApplicationBuilder>? configure = null, IExecutionEventSink? sink = null)
     {
         var args = new List<string> { "--DatabasePath", db.Path };
         if (flightEndpoint is not null) args.AddRange(["--Agents:flight:Endpoint", flightEndpoint]);
@@ -63,8 +65,10 @@ internal sealed class ApiTestHost(WebApplication app, HttpClient client) : IAsyn
             if (runtime is not null)
             {
                 builder.Services.RemoveAll<AgentRuntimeRegistry>();
-                builder.Services.AddSingleton(sp => new AgentRuntimeRegistry([runtime.Register(sp.GetRequiredService<IRunStateStore>())]));
+                builder.Services.AddSingleton(sp => new AgentRuntimeRegistry([runtime.Register(sp.GetRequiredService<IRunStateStore>(),
+                    sink ?? sp.GetRequiredService<RunEventHub>())]));
             }
+            configure?.Invoke(builder);
         });
         await app.StartAsync();
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
@@ -117,8 +121,8 @@ internal sealed class TestRuntime : IModelProvider, IToolProvider, IToolExecutor
     public ToolDefinition Tool { get; } = new(new("test-source", "write"), "write", "Test write",
         JsonSerializer.SerializeToElement(new { type = "object" }));
 
-    public AgentRuntimeRegistration Register(IRunStateStore store) => new("test", "Test Agent", DefinitionId,
-        new AgentRunner(DefinitionId, this, this, this, new(), policyEvaluator: new InMemoryPolicyEvaluator(
+    public AgentRuntimeRegistration Register(IRunStateStore store, IExecutionEventSink? sink = null) => new("test", "Test Agent", DefinitionId,
+        new AgentRunner(DefinitionId, this, this, this, new(), eventSink: sink, policyEvaluator: new InMemoryPolicyEvaluator(
             new Dictionary<ToolId, PolicyDecision> { [Tool.Id] = new(Approval ? PolicyOutcome.RequireApproval : PolicyOutcome.Allow, "policy-v1", "Confirm frozen action.") }),
             runStore: store), this);
 
@@ -153,6 +157,7 @@ internal sealed class StoreControl
     public TaskCompletionSource StartRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ClaimEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ClaimRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public Func<long, IReadOnlyList<ExecutionEvent>, CancellationToken, Task>? AfterRead { get; init; }
 }
 
 internal sealed class ControlledStore(IRunStateStore inner, StoreControl control) : IRunStateStore
@@ -177,5 +182,10 @@ internal sealed class ControlledStore(IRunStateStore inner, StoreControl control
     }
     public ValueTask<RunState?> GetAsync(Guid id, CancellationToken ct) => inner.GetAsync(id, ct);
     public ValueTask AppendEventAsync(ExecutionEvent e, CancellationToken ct) => inner.AppendEventAsync(e, ct);
-    public ValueTask<IReadOnlyList<ExecutionEvent>> ReadEventsAfterAsync(Guid id, long seq, int limit, CancellationToken ct) => inner.ReadEventsAfterAsync(id, seq, limit, ct);
+    public async ValueTask<IReadOnlyList<ExecutionEvent>> ReadEventsAfterAsync(Guid id, long seq, int limit, CancellationToken ct)
+    {
+        var events = await inner.ReadEventsAfterAsync(id, seq, limit, ct);
+        if (control.AfterRead is not null) await control.AfterRead(seq, events, ct);
+        return events;
+    }
 }

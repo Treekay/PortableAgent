@@ -1,4 +1,5 @@
 using PortableAgent.Adapters.Mcp;
+using PortableAgent.Api.Streaming;
 using PortableAgent.Core.Execution;
 using PortableAgent.Core.Models;
 using PortableAgent.Core.Policies;
@@ -27,6 +28,7 @@ public static class ApiRuntimeConfiguration
     {
         var config = services.GetRequiredService<IConfiguration>();
         var store = services.GetRequiredService<IRunStateStore>();
+        var eventHub = services.GetRequiredService<RunEventHub>();
         AgentRuntimeRegistration Create(bool pet)
         {
             var agentId = pet ? "pet" : "flight";
@@ -43,7 +45,7 @@ public static class ApiRuntimeConfiguration
                     : new(PolicyOutcome.RequireApproval, "confirm-flight-cancellation-v1", "Confirm this exact remote cancellation.")
             });
             return new(agentId, pet ? "Pet Boarding" : "Flight Booking", definition,
-                new AgentRunner(definition, model, adapter, adapter, new(), policyEvaluator: policy, runStore: store), adapter);
+                new AgentRunner(definition, model, adapter, adapter, new(), eventSink: eventHub, policyEvaluator: policy, runStore: store), adapter);
         }
         return new([Create(true), Create(false)]);
     }
